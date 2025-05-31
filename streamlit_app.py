@@ -8,6 +8,7 @@ import requests
 from pathlib import Path
 from datetime import datetime
 import toml
+import threading
 
 # Set page config
 st.set_page_config(
@@ -58,15 +59,85 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Define paths
-base_dir = Path(__file__).parent
+# Define paths - adjusted for Streamlit Cloud
+base_dir = Path.cwd()
 logs_dir = base_dir / "logs"
 bot_log_path = logs_dir / "bot.log"
 user_log_path = logs_dir / "user.log"
 bot_script_path = base_dir / "bot.py"
+flag_file_path = base_dir / "bot_running.flag"
 
 # Create logs directory if it doesn't exist
-logs_dir.mkdir(exist_ok=True)
+try:
+    logs_dir.mkdir(exist_ok=True)
+except Exception as e:
+    st.error(f"Failed to create logs directory: {e}")
+    # Fallback to a temporary directory
+    import tempfile
+    logs_dir = Path(tempfile.gettempdir()) / "telegram-ytdl-logs"
+    logs_dir.mkdir(exist_ok=True)
+    bot_log_path = logs_dir / "bot.log"
+    user_log_path = logs_dir / "user.log"
+    st.info(f"Using fallback logs directory: {logs_dir}")
+
+# Check if we're running in Streamlit Cloud
+is_streamlit_cloud = os.environ.get("STREAMLIT_SHARING_MODE") is not None
+
+# Functions for Streamlit Cloud
+def is_bot_running_in_cloud():
+    """Check if the bot is running in Streamlit Cloud"""
+    return flag_file_path.exists()
+
+def start_bot_in_cloud():
+    """Start the bot in Streamlit Cloud using flag file"""
+    try:
+        # Create the flag file
+        with open(flag_file_path, 'w') as f:
+            f.write(str(datetime.now()))
+            
+        # Log the attempt
+        with open(bot_log_path, 'a') as f:
+            f.write(f"{datetime.now()} - INFO - Attempting to start bot via Streamlit Cloud\n")
+            
+        # In Streamlit Cloud, we need to actually start the process
+        # We'll use a thread to avoid blocking the Streamlit app
+        def run_bot():
+            try:
+                with open(bot_log_path, 'a') as f:
+                    f.write(f"{datetime.now()} - INFO - Starting bot process in thread\n")
+                    
+                # Run the bot script
+                os.system(f"python {bot_script_path}")
+                
+            except Exception as e:
+                with open(bot_log_path, 'a') as f:
+                    f.write(f"{datetime.now()} - ERROR - Failed to run bot: {e}\n")
+        
+        # Start the bot in a thread
+        bot_thread = threading.Thread(target=run_bot)
+        bot_thread.daemon = True  # Allow the thread to be terminated when the app stops
+        bot_thread.start()
+        
+        return True
+    except Exception as e:
+        st.error(f"Failed to start bot: {e}")
+        return False
+
+def stop_bot_in_cloud():
+    """Stop the bot in Streamlit Cloud by removing flag file"""
+    try:
+        # Remove the flag file if it exists
+        if flag_file_path.exists():
+            flag_file_path.unlink()
+            
+        # Log the attempt
+        with open(bot_log_path, 'a') as f:
+            f.write(f"{datetime.now()} - INFO - Stopping bot via Streamlit Cloud\n")
+            
+        return True
+    except Exception as e:
+        st.error(f"Failed to stop bot: {e}")
+        return False
 
 # Global variables
 bot_process = None
@@ -86,48 +157,66 @@ def get_log_content(log_path, max_lines=100):
 def start_bot():
     """Start the bot process"""
     global bot_process
-    if bot_process is None or bot_process.poll() is not None:
-        try:
-            # Start the bot as a subprocess
-            bot_process = subprocess.Popen(
-                [sys.executable, str(bot_script_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
+    
+    if is_streamlit_cloud:
+        # Use cloud-specific method
+        success = start_bot_in_cloud()
+        if success:
             st.session_state.bot_running = True
-            return True
-        except Exception as e:
-            st.error(f"Failed to start bot: {e}")
-    return False
+        return success
+    else:
+        # Original method for local deployment
+        if bot_process is None or bot_process.poll() is not None:
+            try:
+                # Start the bot as a subprocess
+                bot_process = subprocess.Popen(
+                    [sys.executable, str(bot_script_path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
+                st.session_state.bot_running = True
+                return True
+            except Exception as e:
+                st.error(f"Failed to start bot: {e}")
+        return False
 
 def stop_bot():
     """Stop the bot process"""
     global bot_process
-    if bot_process is not None and bot_process.poll() is None:
-        try:
-            # Send SIGTERM signal to the process
-            if os.name == 'nt':  # Windows
-                bot_process.terminate()
-            else:  # Unix/Linux
-                os.kill(bot_process.pid, signal.SIGTERM)
-            
-            # Wait for process to terminate
-            try:
-                bot_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                # Force kill if it doesn't terminate
-                if os.name == 'nt':
-                    bot_process.kill()
-                else:
-                    os.kill(bot_process.pid, signal.SIGKILL)
-            
-            bot_process = None
+    
+    if is_streamlit_cloud:
+        # Use cloud-specific method
+        success = stop_bot_in_cloud()
+        if success:
             st.session_state.bot_running = False
-            return True
-        except Exception as e:
-            st.error(f"Failed to stop bot: {e}")
-    return False
+        return success
+    else:
+        # Original method for local deployment
+        if bot_process is not None and bot_process.poll() is None:
+            try:
+                # Send SIGTERM signal to the process
+                if os.name == 'nt':  # Windows
+                    bot_process.terminate()
+                else:  # Unix/Linux
+                    os.kill(bot_process.pid, signal.SIGTERM)
+                
+                # Wait for process to terminate
+                try:
+                    bot_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # Force kill if it doesn't terminate
+                    if os.name == 'nt':
+                        bot_process.kill()
+                    else:
+                        os.kill(bot_process.pid, signal.SIGKILL)
+                
+                bot_process = None
+                st.session_state.bot_running = False
+                return True
+            except Exception as e:
+                st.error(f"Failed to stop bot: {e}")
+        return False
 
 def get_download_stats():
     """Get download statistics from logs"""
@@ -207,9 +296,9 @@ def is_bot_configured():
     if os.environ.get("TELEGRAM_BOT_TOKEN"):
         return True
         
-    # Then check Streamlit secrets
+    # Then check Streamlit secrets - correct way to access secrets
     try:
-        if st.secrets.get("TELEGRAM_BOT_TOKEN"):
+        if "TELEGRAM_BOT_TOKEN" in st.secrets:
             return True
     except:
         pass
@@ -218,7 +307,11 @@ def is_bot_configured():
 
 # Initialize session state
 if 'bot_running' not in st.session_state:
-    st.session_state.bot_running = False
+    # Check if the bot is already running in Streamlit Cloud
+    if is_streamlit_cloud:
+        st.session_state.bot_running = is_bot_running_in_cloud()
+    else:
+        st.session_state.bot_running = False
     
 if 'auto_refresh' not in st.session_state:
     st.session_state.auto_refresh = False
@@ -476,6 +569,8 @@ with st.expander("Usage Instructions"):
     2. Stop and restart the bot using the sidebar controls
     3. Ensure your system has internet connectivity
     """)
+
+
 
 
 
