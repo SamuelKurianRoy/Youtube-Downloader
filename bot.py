@@ -25,23 +25,35 @@ from dotenv import load_dotenv
 import logging.handlers
 import subprocess
 import signal
-print("Running Bot code")
+try:
+    from debug import debug_write
+except ImportError:
+    # Create a simple debug_write function if the module doesn't exist
+    def debug_write(message):
+        print(f"DEBUG: {message}")
+
+# Add this at the start of the script
+debug_write("Bot module loaded")
+
+# Update the setup_logging function
 def setup_logging():
     """Configure logging with file output and filters."""
+    debug_write("Setting up logging")
+    
     # Create logs directory if it doesn't exist
     base_dir = Path.cwd()
     log_dir = base_dir / "logs"
     
     try:
         log_dir.mkdir(exist_ok=True)
-        print(f"Log directory created/verified at {log_dir}")
+        debug_write(f"Log directory created/verified at {log_dir}")
     except Exception as e:
-        print(f"Failed to create log directory: {e}")
+        debug_write(f"Failed to create log directory: {e}")
         # Fallback to a temporary directory
         import tempfile
         log_dir = Path(tempfile.gettempdir()) / "telegram-ytdl-logs"
         log_dir.mkdir(exist_ok=True)
-        print(f"Using fallback log directory: {log_dir}")
+        debug_write(f"Using fallback log directory: {log_dir}")
     
     # Create formatters
     file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -54,7 +66,7 @@ def setup_logging():
         if not bot_log_path.exists():
             with open(bot_log_path, 'w') as f:
                 f.write("")
-            print(f"Created bot log file at {bot_log_path}")
+            debug_write(f"Created bot log file at {bot_log_path}")
             
         bot_handler = logging.handlers.RotatingFileHandler(
             bot_log_path,
@@ -64,8 +76,9 @@ def setup_logging():
         )
         bot_handler.setFormatter(file_formatter)
         bot_handler.setLevel(logging.INFO)
+        debug_write("Bot log handler created successfully")
     except Exception as e:
-        print(f"Failed to create bot log handler: {e}")
+        debug_write(f"Failed to create bot log handler: {e}")
         # Use a stream handler as fallback
         bot_handler = logging.StreamHandler()
         bot_handler.setFormatter(console_formatter)

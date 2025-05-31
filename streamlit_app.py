@@ -10,6 +10,17 @@ from datetime import datetime
 import toml
 import threading
 
+# Import the debug module
+try:
+    from debug import debug_write
+except ImportError:
+    # Create a simple debug_write function if the module doesn't exist
+    def debug_write(message):
+        print(f"DEBUG: {message}")
+
+# Add this at the start of the script
+debug_write("Streamlit app started")
+
 # Set page config
 st.set_page_config(
     page_title="Telegram YouTube Downloader Bot",
@@ -589,6 +600,7 @@ with st.expander("Debug Information"):
     st.write(f"Bot Log Path: `{bot_log_path}`")
     st.write(f"User Log Path: `{user_log_path}`")
     st.write(f"Flag File Path: `{flag_file_path}`")
+    st.write(f"Debug Log Path: `{Path.cwd() / 'debug.log'}`")
     
     st.write("### Directory Structure")
     st.write(f"Current Working Directory: `{os.getcwd()}`")
@@ -596,25 +608,53 @@ with st.expander("Debug Information"):
     
     st.write("### File Existence")
     st.write(f"Logs Directory Exists: `{logs_dir.exists()}`")
-    st.write(f"Bot Log Exists: `{bot_log_path.exists()}`")
-    st.write(f"User Log Exists: `{user_log_path.exists()}`")
-    st.write(f"Flag File Exists: `{flag_file_path.exists()}`")
+    st.write(f"Bot Log Exists: `{Path(bot_log_path).exists()}`")
+    st.write(f"User Log Exists: `{Path(user_log_path).exists()}`")
+    st.write(f"Flag File Exists: `{Path(flag_file_path).exists()}`")
+    st.write(f"Debug Log Exists: `{(Path.cwd() / 'debug.log').exists()}`")
+    
+    # List files in the current directory
+    st.write("### Files in Current Directory")
+    try:
+        files = os.listdir('.')
+        st.write(f"Files: {files}")
+    except Exception as e:
+        st.error(f"Error listing files: {e}")
+    
+    # Show debug log if it exists
+    debug_log_path = Path.cwd() / "debug.log"
+    if debug_log_path.exists():
+        st.write("### Debug Log")
+        with open(debug_log_path, 'r', encoding='utf-8') as f:
+            debug_content = f.read()
+        st.code(debug_content, language="text")
     
     if st.button("Create Test Log Entries"):
         try:
+            debug_write("Test log entry button clicked")
+            
             # Create logs directory if it doesn't exist
             logs_dir.mkdir(exist_ok=True)
+            debug_write(f"Logs directory created/verified: {logs_dir}")
             
             # Write test entries to both log files
             with open(bot_log_path, 'a', encoding='utf-8') as f:
-                f.write(f"{datetime.now()} - INFO - Test log entry created via debug button\n")
+                test_message = f"{datetime.now()} - INFO - Test log entry created via debug button\n"
+                f.write(test_message)
+                debug_write(f"Wrote to bot log: {test_message}")
                 
             with open(user_log_path, 'a', encoding='utf-8') as f:
-                f.write(f"{datetime.now()} | TEST ENTRY | User: 0 | URL: https://example.com | Title: Test Entry\n")
+                test_message = f"{datetime.now()} | TEST ENTRY | User: 0 | URL: https://example.com | Title: Test Entry\n"
+                f.write(test_message)
+                debug_write(f"Wrote to user log: {test_message}")
                 
             st.success("Test log entries created successfully!")
+            debug_write("Test log entries created successfully")
         except Exception as e:
-            st.error(f"Failed to create test log entries: {e}")
+            error_message = f"Failed to create test log entries: {e}"
+            st.error(error_message)
+            debug_write(f"ERROR: {error_message}")
+
 
 
 

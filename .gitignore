@@ -1,3 +1,29 @@
-logs/
-storage/
-ffmpeg/
+# Logs directory - but keep the directory itself
+logs/*
+!logs/.gitkeep
+
+# Storage directory - but keep the directory itself
+storage/*
+!storage/.gitkeep
+
+# FFmpeg directory - but keep the directory itself
+ffmpeg/*
+!ffmpeg/.gitkeep
+
+# Debug log
+debug.log
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Streamlit secrets
+.streamlit/secrets.toml
