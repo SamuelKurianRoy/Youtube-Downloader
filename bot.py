@@ -29,7 +29,8 @@ import signal
 def setup_logging():
     """Configure logging with file output and filters."""
     # Create logs directory if it doesn't exist
-    log_dir = Path(__file__).parent / "logs"
+    base_dir = Path.cwd()
+    log_dir = base_dir / "logs"
     log_dir.mkdir(exist_ok=True)
     
     # Create formatters
@@ -87,8 +88,11 @@ def setup_logging():
 logger, user_logger = setup_logging()
 
 # Load environment variables
-env_path = r"C:\Users\hai\Desktop\Youtube_Downloader_bot\Enviornment_Variables.env"
-load_dotenv(env_path)
+# First try to load from .env file
+try:
+    load_dotenv()
+except Exception as e:
+    logger.warning(f"Could not load .env file: {e}")
 
 # Environment variables
 class Environment:
@@ -97,9 +101,10 @@ class Environment:
         webhook_port = self.get_variable("TELEGRAM_WEBHOOK_PORT", "")
         self.WEBHOOK_PORT = int(webhook_port) if webhook_port.strip() else None
         self.WEBHOOK_URL = self.get_variable("TELEGRAM_WEBHOOK_URL", "")
-        self.API_ROOT = self.get_variable("TELEGRAM_API_ROOT")
-        self.BOT_TOKEN = self.get_variable("TELEGRAM_BOT_TOKEN")
-        self.ADMIN_ID = int(self.get_variable("ADMIN_ID"))
+        self.API_ROOT = self.get_variable("TELEGRAM_API_ROOT", "")
+        self.BOT_TOKEN = self.get_variable("TELEGRAM_BOT_TOKEN", "")
+        admin_id = self.get_variable("ADMIN_ID", "")
+        self.ADMIN_ID = int(admin_id) if admin_id.strip() and admin_id.strip().isdigit() else None
         self.WHITELISTED_IDS = [
             int(id) for id in self.get_variable("WHITELISTED_IDS", "").split(",") 
             if id.strip() and id.strip().isdigit()
@@ -109,7 +114,7 @@ class Environment:
         self.COBALT_INSTANCE_URL = self.get_variable("COBALT_INSTANCE_URL", "")
         
         # Paths
-        self.BASE_DIR = Path(__file__).parent
+        self.BASE_DIR = Path.cwd()
         self.STORAGE_DIR = self.BASE_DIR / "storage"
         self.COOKIE_FILE = self.STORAGE_DIR / "cookies.txt"
         self.TRANSLATIONS_FILE = self.STORAGE_DIR / "saved-translations.json"
@@ -134,7 +139,8 @@ class Environment:
             return value
         if default is not None:
             return default
-        raise EnvironmentError(f"Environment variable {key} is not set")
+        logger.warning(f"Environment variable {key} is not set, using empty string")
+        return ""
 
     def get_cookie_args(self) -> List[str]:
         if self.COOKIE_FILE.exists() and self.COOKIE_FILE.is_file():
@@ -143,6 +149,11 @@ class Environment:
 
 # Initialize environment
 env = Environment()
+
+# Check for required environment variables
+if not env.BOT_TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN is not set. Bot cannot start.")
+    exit(1)
 
 # Constants
 class Text:
@@ -156,14 +167,7 @@ class Text:
         f"<b>As an alternative I recommend checking out <a href=\"https://github.com/yt-dlp/yt-dlp\">yt-dlp</a>, "
         f"the command line tool that powers this bot or <a href=\"https://cobalt.tools\">cobalt</a>, "
         f"a web-based social media content downloader (not affiliated with this bot).</b>\n\n"
-        "<b>Do not</b> try to contact me to get whitelisted, I will not accept anyone I don't know personally."
     )
-    CUTOFF_NOTICE = "\n\n[...]\n\nThis message was cut off due to the Telegram Message character limit. View the full output in the logs."
-    SELECT_FORMAT = "<b>Please select the format you want to download:</b>"
-    SELECT_QUALITY = "<b>Please select the quality:</b>"
-    DOWNLOADING = "<b>Downloading your selection...</b>"
-    DOWNLOAD_FAILED = "<b>Download failed.</b> Please try again or choose a different format/quality."
-    SIZE_TOO_LARGE = "<b>The selected file is too large for Telegram.</b> Maximum allowed size is 50MB for videos."
 
 # Callback data prefixes
 class CallbackPrefix:
@@ -733,11 +737,11 @@ class TelegramYTDLBot:
         self.bot = None
         
         # Initialize other components
-        self.queue = Queue()
-        self.updater = Updater(env.YTDL_AUTOUPDATE)
-        self.translation = TranslationService(env.OPENAI_API_KEY, env.TRANSLATIONS_FILE)
-        self.cobalt = CobaltAPI(env.COBALT_INSTANCE_URL)
-        self.user_prefs = UserPreferences(env.USER_PREFS_FILE)
+        self.queue = None  # Will be initialized later
+        self.updater = None  # Will be initialized later
+        self.translation = None  # Will be initialized later
+        self.cobalt = None  # Will be initialized later
+        self.user_prefs = None  # Will be initialized later
         
         # Download contexts for active downloads - keyed by user_id
         self.download_contexts = {}
@@ -750,60 +754,92 @@ class TelegramYTDLBot:
         
         # FFmpeg path
         self.ffmpeg_path = None
+        
+        # Flag to check if bot should be running
+        self.should_run = True
 
     async def initialize(self):
         """Initialize the bot and its components."""
-        # Initialize application
-        self.application = Application.builder().token(env.BOT_TOKEN).build()
-        
-        # Initialize the application
-        await self.application.initialize()
-        
-        # Get bot instance
-        self.bot = self.application.bot
-        
-        # Set up handlers
-        self.setup_handlers()
-        
-        # Setup FFmpeg
-        await self.setup_ffmpeg()
+        try:
+            # Initialize application
+            application_builder = Application.builder().token(env.BOT_TOKEN)
+            
+            # Set custom API endpoint if provided
+            if env.API_ROOT:
+                application_builder.base_url(env.API_ROOT)
+                
+            self.application = application_builder.build()
+            
+            # Initialize the application
+            await self.application.initialize()
+            
+            # Get bot instance
+            self.bot = self.application.bot
+            
+            # Initialize other components
+            from queue_manager import Queue
+            from updater import Updater
+            from translation import TranslationService
+            from cobalt_api import CobaltAPI
+            from user_preferences import UserPreferences
+            
+            self.queue = Queue()
+            self.updater = Updater(env.YTDL_AUTOUPDATE)
+            self.translation = TranslationService(env.OPENAI_API_KEY, env.TRANSLATIONS_FILE)
+            self.cobalt = CobaltAPI(env.COBALT_INSTANCE_URL)
+            self.user_prefs = UserPreferences(env.USER_PREFS_FILE)
+            
+            # Set up handlers
+            self.setup_handlers()
+            
+            # Setup FFmpeg
+            await self.setup_ffmpeg()
+            
+            logger.info("Bot initialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error initializing bot: {e}")
+            return False
 
     async def setup_ffmpeg(self):
         """Setup FFmpeg and add it to PATH."""
-        self.ffmpeg_path = await download_ffmpeg()
-        if self.ffmpeg_path:
-            os.environ["PATH"] = self.ffmpeg_path + os.pathsep + os.environ["PATH"]
-        return self.ffmpeg_path
+        try:
+            self.ffmpeg_path = await download_ffmpeg()
+            if self.ffmpeg_path:
+                os.environ["PATH"] = self.ffmpeg_path + os.pathsep + os.environ["PATH"]
+                logger.info(f"FFmpeg set up at: {self.ffmpeg_path}")
+            return self.ffmpeg_path
+        except Exception as e:
+            logger.error(f"Error setting up FFmpeg: {e}")
+            return None
 
     async def start(self):
         """Start the bot with proper initialization."""
         try:
             # Initialize bot components
-            await self.initialize()
+            success = await self.initialize()
+            if not success:
+                logger.error("Failed to initialize bot. Exiting.")
+                return
             
-            logger.info("Starting bot in polling mode")
+            # Check for Streamlit Cloud flag file
+            flag_file = Path.cwd() / "bot_running.flag"
             
             # Start polling
+            logger.info("Starting bot in polling mode")
             await self.application.start()
             await self.application.updater.start_polling()
             
-            # Block until we receive a stop signal
-            stop_signal = asyncio.Future()
-            
-            def signal_handler():
-                stop_signal.set_result(None)
-            
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                try:
-                    signal.signal(sig, lambda s, f: signal_handler())
-                except ValueError:
-                    # Signal not supported on this platform
-                    pass
-            
-            try:
-                await stop_signal
-            except asyncio.CancelledError:
-                pass
+            # Block until we receive a stop signal or flag file is removed
+            while self.should_run:
+                # In Streamlit Cloud, check if the flag file exists
+                if not flag_file.exists():
+                    logger.info("Stop flag detected. Stopping bot.")
+                    self.should_run = False
+                    break
+                
+                await asyncio.sleep(5)  # Check every 5 seconds
             
         except Exception as e:
             logger.error(f"Error running bot: {e}")
@@ -811,9 +847,11 @@ class TelegramYTDLBot:
         finally:
             # Ensure proper cleanup
             if self.application:
+                logger.info("Shutting down bot...")
                 await self.application.updater.stop()
                 await self.application.stop()
                 await self.application.shutdown()
+                logger.info("Bot shutdown complete")
 
     @classmethod
     async def create_and_run(cls):
@@ -832,9 +870,9 @@ class TelegramYTDLBot:
             # Run the bot
             loop.run_until_complete(cls.create_and_run())
         except KeyboardInterrupt:
-            print("\nBot stopped by user")
+            logger.info("Bot stopped by user")
         except Exception as e:
-            print(f"\nError: {e}")
+            logger.error(f"Error: {e}")
         finally:
             # Clean up
             try:
@@ -1482,45 +1520,45 @@ class TelegramYTDLBot:
         )
 
 async def download_ffmpeg():
-    """Download and setup FFmpeg."""
+    """Download FFmpeg for the current platform."""
     try:
-        # Create FFmpeg directory
-        ffmpeg_dir = Path(__file__).parent / "ffmpeg"
+        # For Streamlit Cloud, we'll use a simpler approach
+        # Check if ffmpeg is already installed
+        try:
+            result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
+            if result.returncode == 0:
+                logger.info("FFmpeg is already installed on the system")
+                return None  # No need to add to PATH
+        except:
+            logger.info("FFmpeg not found in system PATH, will download")
+        
+        # Create ffmpeg directory
+        ffmpeg_dir = Path.cwd() / "ffmpeg"
         ffmpeg_dir.mkdir(exist_ok=True)
         
-        # Check if FFmpeg already exists
-        ffmpeg_exe = ffmpeg_dir / "ffmpeg.exe"
-        if ffmpeg_exe.exists():
+        # Check if we already have ffmpeg in our directory
+        if (ffmpeg_dir / "ffmpeg").exists() or (ffmpeg_dir / "ffmpeg.exe").exists():
+            logger.info("Using previously downloaded FFmpeg")
             return str(ffmpeg_dir)
-            
-        logger.info("Downloading FFmpeg...")
-        # Download FFmpeg
-        url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-        response = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: requests.get(url, stream=True)
-        )
         
-        # Save the zip file
-        zip_path = ffmpeg_dir / "ffmpeg.zip"
-        with open(zip_path, 'wb') as f:
+        # Download FFmpeg (simplified for Streamlit Cloud)
+        logger.info("Downloading FFmpeg...")
+        
+        # For Streamlit Cloud, we'll use a pre-built static binary
+        ffmpeg_url = "https://github.com/eugeneware/ffmpeg-static/releases/download/b4.4/ffmpeg-linux-x64"
+        
+        # Download the file
+        response = requests.get(ffmpeg_url, stream=True)
+        response.raise_for_status()
+        
+        # Save the file
+        ffmpeg_path = ffmpeg_dir / "ffmpeg"
+        with open(ffmpeg_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-                
-        logger.info("Extracting FFmpeg...")
-        # Extract the zip file
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(ffmpeg_dir)
-            
-        # Move files from nested directory
-        nested_dir = next(ffmpeg_dir.glob("ffmpeg-master-*"))
-        bin_dir = nested_dir / "bin"
-        for file in bin_dir.glob("*"):
-            shutil.move(str(file), str(ffmpeg_dir))
-            
-        # Clean up
-        shutil.rmtree(str(nested_dir))
-        zip_path.unlink()
+        
+        # Make it executable
+        os.chmod(ffmpeg_path, 0o755)
         
         logger.info("FFmpeg setup complete")
         return str(ffmpeg_dir)
@@ -1529,5 +1567,15 @@ async def download_ffmpeg():
         logger.error(f"Error downloading FFmpeg: {e}")
         return None
 
+# Check for Streamlit Cloud flag file
+def should_start_bot():
+    flag_file = Path.cwd() / "bot_running.flag"
+    return flag_file.exists()
+
 if __name__ == "__main__":
-    TelegramYTDLBot.run_bot()
+    # Only start the bot if the flag file exists (for Streamlit Cloud)
+    if should_start_bot():
+        logger.info("Bot flag file found, starting bot")
+        TelegramYTDLBot.run_bot()
+    else:
+        logger.info("Bot flag file not found, not starting bot")
