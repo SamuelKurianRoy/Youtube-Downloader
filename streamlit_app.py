@@ -7,6 +7,7 @@ import sys
 import requests
 from pathlib import Path
 from datetime import datetime
+import toml
 
 # Set page config
 st.set_page_config(
@@ -57,8 +58,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Define paths for Streamlit Cloud compatibility
-base_dir = Path.cwd()
+# Define paths
+base_dir = Path(__file__).parent
 logs_dir = base_dir / "logs"
 bot_log_path = logs_dir / "bot.log"
 user_log_path = logs_dir / "user.log"
@@ -66,15 +67,6 @@ bot_script_path = base_dir / "bot.py"
 
 # Create logs directory if it doesn't exist
 logs_dir.mkdir(exist_ok=True)
-
-# Create empty log files if they don't exist
-if not bot_log_path.exists():
-    with open(bot_log_path, 'w') as f:
-        f.write("Log initialized for Streamlit Cloud\n")
-        
-if not user_log_path.exists():
-    with open(user_log_path, 'w') as f:
-        f.write("User log initialized for Streamlit Cloud\n")
 
 # Global variables
 bot_process = None
@@ -87,55 +79,55 @@ def get_log_content(log_path, max_lines=100):
             with open(log_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
                 return "".join(lines[-max_lines:])
-        return "Log file not found or empty."
+        return "Log file not found."
     except Exception as e:
         return f"Error reading log: {str(e)}"
 
 def start_bot():
-    """Start the bot process for Streamlit Cloud"""
+    """Start the bot process"""
     global bot_process
-    
-    # For Streamlit Cloud, we'll use a different approach
-    # since we can't directly manage processes
-    try:
-        # Write to the log that we're attempting to start
-        with open(bot_log_path, 'a') as f:
-            f.write(f"{datetime.now()} - INFO - Attempting to start bot via Streamlit Cloud\n")
-            
-        # In Streamlit Cloud, we'll use a flag file to indicate the bot should be running
-        with open(base_dir / "bot_running.flag", 'w') as f:
-            f.write(str(datetime.now()))
-            
-        st.session_state.bot_running = True
-        return True
-    except Exception as e:
-        st.error(f"Failed to start bot: {e}")
-        return False
+    if bot_process is None or bot_process.poll() is not None:
+        try:
+            # Start the bot as a subprocess
+            bot_process = subprocess.Popen(
+                [sys.executable, str(bot_script_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            st.session_state.bot_running = True
+            return True
+        except Exception as e:
+            st.error(f"Failed to start bot: {e}")
+    return False
 
 def stop_bot():
-    """Stop the bot process for Streamlit Cloud"""
+    """Stop the bot process"""
     global bot_process
-    
-    try:
-        # Write to the log that we're attempting to stop
-        with open(bot_log_path, 'a') as f:
-            f.write(f"{datetime.now()} - INFO - Attempting to stop bot via Streamlit Cloud\n")
+    if bot_process is not None and bot_process.poll() is None:
+        try:
+            # Send SIGTERM signal to the process
+            if os.name == 'nt':  # Windows
+                bot_process.terminate()
+            else:  # Unix/Linux
+                os.kill(bot_process.pid, signal.SIGTERM)
             
-        # Remove the flag file to indicate the bot should stop
-        flag_file = base_dir / "bot_running.flag"
-        if flag_file.exists():
-            flag_file.unlink()
+            # Wait for process to terminate
+            try:
+                bot_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Force kill if it doesn't terminate
+                if os.name == 'nt':
+                    bot_process.kill()
+                else:
+                    os.kill(bot_process.pid, signal.SIGKILL)
             
-        st.session_state.bot_running = False
-        return True
-    except Exception as e:
-        st.error(f"Failed to stop bot: {e}")
-        return False
-
-def check_bot_status():
-    """Check if the bot is running in Streamlit Cloud"""
-    flag_file = base_dir / "bot_running.flag"
-    return flag_file.exists()
+            bot_process = None
+            st.session_state.bot_running = False
+            return True
+        except Exception as e:
+            st.error(f"Failed to stop bot: {e}")
+    return False
 
 def get_download_stats():
     """Get download statistics from logs"""
@@ -208,9 +200,25 @@ def check_yt_dlp_version():
     except:
         return "Unknown"
 
+# Function to check if bot token is configured
+def is_bot_configured():
+    """Check if the bot token is configured in secrets or environment variables"""
+    # Check environment variables first
+    if os.environ.get("TELEGRAM_BOT_TOKEN"):
+        return True
+        
+    # Then check Streamlit secrets
+    try:
+        if st.secrets.get("TELEGRAM_BOT_TOKEN"):
+            return True
+    except:
+        pass
+        
+    return False
+
 # Initialize session state
 if 'bot_running' not in st.session_state:
-    st.session_state.bot_running = check_bot_status()
+    st.session_state.bot_running = False
     
 if 'auto_refresh' not in st.session_state:
     st.session_state.auto_refresh = False
@@ -223,23 +231,51 @@ with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/800px-YouTube_full-color_icon_%282017%29.svg.png", width=100)
     st.markdown("<h2 style='text-align: center;'>Bot Controls</h2>", unsafe_allow_html=True)
     
+    # Check if bot is configured
+    if not is_bot_configured():
+        st.error("⚠️ Bot token not configured!")
+        st.info("Please set up your bot token in Streamlit secrets or environment variables.")
+        
+        # Add a secrets configuration section
+        with st.expander("Configure Bot Secrets"):
+            st.write("Create a file named `.streamlit/secrets.toml` with the following content:")
+            
+            example_secrets = """
+            # Telegram Bot Configuration
+            TELEGRAM_BOT_TOKEN = "your_bot_token_here"
+            TELEGRAM_WEBHOOK_URL = ""
+            TELEGRAM_WEBHOOK_PORT = ""
+            TELEGRAM_API_ROOT = ""
+            
+            # API Keys
+            OPENAI_API_KEY = ""
+            COBALT_INSTANCE_URL = ""
+            
+            # Bot Settings
+            YTDL_AUTOUPDATE = "true"
+            ADMIN_ID = ""
+            WHITELISTED_IDS = ""
+            ALLOW_GROUPS = "false"
+            """
+            
+            st.code(example_secrets, language="toml")
+            
+            st.write("Or configure these settings in Streamlit Cloud's secrets management.")
+    
     status = "🟢 RUNNING" if st.session_state.bot_running else "🔴 STOPPED"
     status_class = "status-running" if st.session_state.bot_running else "status-stopped"
     st.markdown(f"<h3 style='text-align: center;' class='{status_class}'>{status}</h3>", unsafe_allow_html=True)
     
-    # Note about Streamlit Cloud limitations
-    st.info("⚠️ Note: On Streamlit Cloud, the bot control buttons are for demonstration only. The actual bot needs to be run separately.")
-    
     if st.session_state.bot_running:
         if st.button("⏹️ STOP BOT", type="primary", use_container_width=True):
             if stop_bot():
-                st.success("Bot stop signal sent!")
+                st.success("Bot stopped successfully!")
                 time.sleep(1)
                 st.rerun()
     else:
         if st.button("▶️ START BOT", type="primary", use_container_width=True):
             if start_bot():
-                st.success("Bot start signal sent!")
+                st.success("Bot started successfully!")
                 time.sleep(1)
                 st.rerun()
     
@@ -275,14 +311,6 @@ with st.sidebar:
 
 # Main content
 st.markdown("<h1 class='main-header'>📥 Telegram YouTube Downloader Bot</h1>", unsafe_allow_html=True)
-
-# Streamlit Cloud notice
-st.warning("""
-**Streamlit Cloud Deployment Notice:**
-This dashboard is running on Streamlit Cloud, which has limitations for running background processes.
-For full functionality, the bot should be run on a dedicated server or local machine.
-This interface can be used to monitor logs and statistics from a separately running bot instance.
-""")
 
 # Dashboard
 st.markdown("<h2 class='sub-header'>📊 Dashboard</h2>", unsafe_allow_html=True)
@@ -421,35 +449,6 @@ with st.expander("About This Bot"):
     4. Bot downloads and sends the file to the user
     """)
 
-with st.expander("Streamlit Cloud Deployment Guide"):
-    st.markdown("""
-    ### Deploying on Streamlit Cloud
-    
-    **Important Limitations:**
-    
-    Streamlit Cloud has limitations that affect how this bot can be deployed:
-    
-    1. **Process Management**: Streamlit Cloud doesn't allow long-running background processes
-    2. **File System**: The file system is ephemeral and resets between sessions
-    3. **Resource Limits**: CPU and memory are limited
-    
-    **Recommended Deployment Strategy:**
-    
-    1. **Run the bot separately** on a dedicated server (VPS, Heroku, etc.)
-    2. **Use this dashboard** to monitor logs and statistics
-    3. **Share logs** between the bot and this dashboard using a shared database or API
-    
-    **Alternative Approach:**
-    
-    If you want to run everything on Streamlit Cloud:
-    
-    1. Modify the bot to run as a serverless function
-    2. Use a database service for storing logs and statistics
-    3. Create API endpoints for controlling the bot
-    
-    For full functionality, consider hosting on a VPS provider like DigitalOcean, Linode, or AWS.
-    """)
-
 with st.expander("Usage Instructions"):
     st.markdown("""
     ### How to Use the Bot
@@ -477,4 +476,6 @@ with st.expander("Usage Instructions"):
     2. Stop and restart the bot using the sidebar controls
     3. Ensure your system has internet connectivity
     """)
+
+
 
