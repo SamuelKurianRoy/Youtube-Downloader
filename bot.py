@@ -31,31 +31,69 @@ def setup_logging():
     # Create logs directory if it doesn't exist
     base_dir = Path.cwd()
     log_dir = base_dir / "logs"
-    log_dir.mkdir(exist_ok=True)
+    
+    try:
+        log_dir.mkdir(exist_ok=True)
+        print(f"Log directory created/verified at {log_dir}")
+    except Exception as e:
+        print(f"Failed to create log directory: {e}")
+        # Fallback to a temporary directory
+        import tempfile
+        log_dir = Path(tempfile.gettempdir()) / "telegram-ytdl-logs"
+        log_dir.mkdir(exist_ok=True)
+        print(f"Using fallback log directory: {log_dir}")
     
     # Create formatters
     file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     
     # Setup bot log handler with rotation (for errors and system messages)
-    bot_handler = logging.handlers.RotatingFileHandler(
-        log_dir / "bot.log",
-        maxBytes=1024 * 1024,  # 1MB
-        backupCount=5,
-        encoding='utf-8'
-    )
-    bot_handler.setFormatter(file_formatter)
-    bot_handler.setLevel(logging.INFO)
+    bot_log_path = log_dir / "bot.log"
+    try:
+        # First try to create the file if it doesn't exist
+        if not bot_log_path.exists():
+            with open(bot_log_path, 'w') as f:
+                f.write("")
+            print(f"Created bot log file at {bot_log_path}")
+            
+        bot_handler = logging.handlers.RotatingFileHandler(
+            bot_log_path,
+            maxBytes=1024 * 1024,  # 1MB
+            backupCount=5,
+            encoding='utf-8'
+        )
+        bot_handler.setFormatter(file_formatter)
+        bot_handler.setLevel(logging.INFO)
+    except Exception as e:
+        print(f"Failed to create bot log handler: {e}")
+        # Use a stream handler as fallback
+        bot_handler = logging.StreamHandler()
+        bot_handler.setFormatter(console_formatter)
+        bot_handler.setLevel(logging.INFO)
     
     # Setup user log handler with rotation (for user activity)
-    user_handler = logging.handlers.RotatingFileHandler(
-        log_dir / "user.log",
-        maxBytes=1024 * 1024,  # 1MB
-        backupCount=5,
-        encoding='utf-8'
-    )
-    user_handler.setFormatter(file_formatter)
-    user_handler.setLevel(logging.INFO)
+    user_log_path = log_dir / "user.log"
+    try:
+        # First try to create the file if it doesn't exist
+        if not user_log_path.exists():
+            with open(user_log_path, 'w') as f:
+                f.write("")
+            print(f"Created user log file at {user_log_path}")
+            
+        user_handler = logging.handlers.RotatingFileHandler(
+            user_log_path,
+            maxBytes=1024 * 1024,  # 1MB
+            backupCount=5,
+            encoding='utf-8'
+        )
+        user_handler.setFormatter(file_formatter)
+        user_handler.setLevel(logging.INFO)
+    except Exception as e:
+        print(f"Failed to create user log handler: {e}")
+        # Use a stream handler as fallback
+        user_handler = logging.StreamHandler()
+        user_handler.setFormatter(console_formatter)
+        user_handler.setLevel(logging.INFO)
     
     # Setup console handler
     console_handler = logging.StreamHandler()
@@ -81,6 +119,12 @@ def setup_logging():
     
     # Set httpx logger to WARNING level to suppress request logs
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    
+    # Write initial log entries to verify logging is working
+    bot_logger.info("Logging initialized")
+    user_logger.info("User activity logging initialized")
+    
+    print(f"Logging setup complete. Bot log: {bot_log_path}, User log: {user_log_path}")
     
     return bot_logger, user_logger
 
@@ -126,44 +170,15 @@ class Environment:
         self.OPENAI_API_KEY = self.get_variable("OPENAI_API_KEY", "")
         self.COBALT_INSTANCE_URL = self.get_variable("COBALT_INSTANCE_URL", "")
         
-        # Paths - adjusted for Streamlit Cloud
+        # Paths
         self.BASE_DIR = Path.cwd()
-        
-        # For Streamlit Cloud, use a persistent directory if available
-        # Check if we're running in Streamlit Cloud by looking for STREAMLIT_SHARING_MODE env var
-        self.is_streamlit_cloud = os.environ.get("STREAMLIT_SHARING_MODE") is not None
-        
-        if self.is_streamlit_cloud:
-            logger.info("Running in Streamlit Cloud environment")
-            # In Streamlit Cloud, we need to use directories that persist
-            # The current working directory should be writable
-            self.STORAGE_DIR = self.BASE_DIR / "storage"
-        else:
-            # Local environment
-            self.STORAGE_DIR = self.BASE_DIR / "storage"
-            
-        logger.info(f"Storage directory set to: {self.STORAGE_DIR}")
-        
+        self.STORAGE_DIR = self.BASE_DIR / "storage"
         self.COOKIE_FILE = self.STORAGE_DIR / "cookies.txt"
         self.TRANSLATIONS_FILE = self.STORAGE_DIR / "saved-translations.json"
         self.USER_PREFS_FILE = self.STORAGE_DIR / "user-preferences.json"
         
         # Create storage directory if it doesn't exist
-        try:
-            self.STORAGE_DIR.mkdir(exist_ok=True)
-            logger.info(f"Storage directory created/verified at {self.STORAGE_DIR}")
-        except Exception as e:
-            logger.error(f"Failed to create storage directory: {e}")
-            # Fallback to a temporary directory
-            import tempfile
-            self.STORAGE_DIR = Path(tempfile.gettempdir()) / "telegram-ytdl"
-            self.STORAGE_DIR.mkdir(exist_ok=True)
-            logger.info(f"Using fallback storage directory: {self.STORAGE_DIR}")
-            
-            # Update paths with new storage dir
-            self.COOKIE_FILE = self.STORAGE_DIR / "cookies.txt"
-            self.TRANSLATIONS_FILE = self.STORAGE_DIR / "saved-translations.json"
-            self.USER_PREFS_FILE = self.STORAGE_DIR / "user-preferences.json"
+        self.STORAGE_DIR.mkdir(exist_ok=True)
         
         # Create translations file if it doesn't exist
         if not self.TRANSLATIONS_FILE.exists():

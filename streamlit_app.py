@@ -150,9 +150,22 @@ def get_log_content(log_path, max_lines=100):
             with open(log_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
                 return "".join(lines[-max_lines:])
-        return "Log file not found."
+        else:
+            # If log file doesn't exist, create it with a message
+            with open(log_path, 'w', encoding='utf-8') as f:
+                message = f"{datetime.now()} - INFO - Log file created\n"
+                f.write(message)
+            return message
     except Exception as e:
-        return f"Error reading log: {str(e)}"
+        error_message = f"Error reading log: {str(e)}"
+        st.error(error_message)
+        # Try to create the log file with the error message
+        try:
+            with open(log_path, 'w', encoding='utf-8') as f:
+                f.write(f"{datetime.now()} - ERROR - {error_message}\n")
+        except:
+            pass
+        return error_message
 
 def start_bot():
     """Start the bot process"""
@@ -570,6 +583,38 @@ with st.expander("Usage Instructions"):
     3. Ensure your system has internet connectivity
     """)
 
+# Add a debug section to the app
+with st.expander("Debug Information"):
+    st.write("### Log File Paths")
+    st.write(f"Bot Log Path: `{bot_log_path}`")
+    st.write(f"User Log Path: `{user_log_path}`")
+    st.write(f"Flag File Path: `{flag_file_path}`")
+    
+    st.write("### Directory Structure")
+    st.write(f"Current Working Directory: `{os.getcwd()}`")
+    st.write(f"Logs Directory: `{logs_dir}`")
+    
+    st.write("### File Existence")
+    st.write(f"Logs Directory Exists: `{logs_dir.exists()}`")
+    st.write(f"Bot Log Exists: `{bot_log_path.exists()}`")
+    st.write(f"User Log Exists: `{user_log_path.exists()}`")
+    st.write(f"Flag File Exists: `{flag_file_path.exists()}`")
+    
+    if st.button("Create Test Log Entries"):
+        try:
+            # Create logs directory if it doesn't exist
+            logs_dir.mkdir(exist_ok=True)
+            
+            # Write test entries to both log files
+            with open(bot_log_path, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.now()} - INFO - Test log entry created via debug button\n")
+                
+            with open(user_log_path, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.now()} | TEST ENTRY | User: 0 | URL: https://example.com | Title: Test Entry\n")
+                
+            st.success("Test log entries created successfully!")
+        except Exception as e:
+            st.error(f"Failed to create test log entries: {e}")
 
 
 
