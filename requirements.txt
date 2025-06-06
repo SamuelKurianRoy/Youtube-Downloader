@@ -12,10 +12,5 @@ asyncio>=3.4.3
 
 # For handling files and processes
 zipfile36>=0.1.3
+
 psutil>=5.9.0
-
-# Added for Streamlit Cloud deployment
-toml>=0.10.2
-
-# For Spotify downloads
-spotdl>=4.1.0

@@ -286,17 +286,31 @@ if not env.BOT_TOKEN:
 
 # Constants
 class Text:
+    URL_REMINDER = "You need to send an URL to download stuff."
+    MAINTENANCE_NOTICE = "<b>Bot is currently under maintenance, it'll return shortly.</b>"
+    PROCESSING = "<b>Processing...</b>"
     DENIED_MESSAGE = (
         "<b>This bot is private.</b>\n\n"
-        "If you want to use this bot, please contact the administrator."
+        "It costs money to run this and unfortunately it doesn't grow on trees.\n"
+        f"This bot is open source, so you can always <a href=\"https://github.com/vaaski/telegram-ytdl#hosting\">host it yourself</a>.\n\n"
+        f"<b>As an alternative I recommend checking out <a href=\"https://github.com/yt-dlp/yt-dlp\">yt-dlp</a>, "
+        f"the command line tool that powers this bot or <a href=\"https://cobalt.tools\">cobalt</a>, "
+        f"a web-based social media content downloader (not affiliated with this bot).</b>\n\n"
     )
 
-# Callback data prefixes (simplified for audio only)
+# Callback data prefixes
 class CallbackPrefix:
+    FORMAT = "format:"  # format:video, format:audio
+    VIDEO_QUALITY = "vq:"  # vq:high, vq:medium, vq:low
     AUDIO_QUALITY = "aq:"  # aq:high, aq:medium, aq:low
     CANCEL = "cancel"
 
-# Audio quality options
+# Format quality options
+class VideoQuality:
+    HIGH = "high"     # Best available
+    MEDIUM = "medium" # 720p
+    LOW = "low"       # 480p
+
 class AudioQuality:
     HIGH = "high"     # 320kbps
     MEDIUM = "medium" # 192kbps
@@ -396,73 +410,6 @@ def url_matcher(url: str, matcher: str) -> bool:
     """Check if URL matches a specific domain."""
     parsed = urlparse(url)
     return parsed.netloc.endswith(matcher)
-
-def detect_platform(url: str) -> str:
-    """Detect the platform from URL."""
-    url_lower = url.lower()
-
-    # YouTube
-    if any(domain in url_lower for domain in ['youtube.com', 'youtu.be', 'music.youtube.com']):
-        return 'YouTube'
-
-    # Instagram
-    elif any(domain in url_lower for domain in ['instagram.com', 'instagr.am']):
-        return 'Instagram'
-
-    # Spotify
-    elif 'spotify.com' in url_lower:
-        return 'Spotify'
-
-    # TikTok
-    elif 'tiktok.com' in url_lower:
-        return 'TikTok'
-
-    # Twitter/X
-    elif any(domain in url_lower for domain in ['twitter.com', 'x.com']):
-        return 'Twitter/X'
-
-    # SoundCloud
-    elif 'soundcloud.com' in url_lower:
-        return 'SoundCloud'
-
-    # Facebook
-    elif any(domain in url_lower for domain in ['facebook.com', 'fb.watch']):
-        return 'Facebook'
-
-    # Default
-    else:
-        return 'Unknown Platform'
-
-def is_supported_url(url: str) -> bool:
-    """Check if the URL is from a supported platform."""
-    # Platforms that actually work well with yt-dlp without authentication
-    supported_domains = [
-        'youtube.com', 'youtu.be', 'music.youtube.com',
-        'spotify.com',  # Now supported via spotdl
-        'tiktok.com',
-        'twitter.com', 'x.com',
-        'soundcloud.com',
-        'facebook.com', 'fb.watch',
-        'vimeo.com',
-        'dailymotion.com',
-        'twitch.tv'
-    ]
-
-    url_lower = url.lower()
-    return any(domain in url_lower for domain in supported_domains)
-
-def is_limited_support_url(url: str) -> bool:
-    """Check if the URL is from a platform with limited/conditional support."""
-    limited_domains = [
-        'instagram.com', 'instagr.am',  # Requires authentication
-    ]
-
-    url_lower = url.lower()
-    return any(domain in url_lower for domain in limited_domains)
-
-def is_spotify_url(url: str) -> bool:
-    """Check if the URL is from Spotify."""
-    return 'spotify.com' in url.lower()
 
 def format_file_size(size_bytes: int) -> str:
     """Format file size in human-readable format."""
@@ -727,6 +674,190 @@ def get_thumbnail(thumbnails: List[Dict]) -> Optional[str]:
     
     return None
 
+# Handle URL download context
+class DownloadContext:
+    def __init__(self):
+        self.url = None
+        self.info = None
+        self.processing_message = None
+        self.chat_id = None
+        self.user_id = None
+        self.message_id = None
+        self.title = None
+        self.is_tiktok = False
+        self.is_youtube_music = False
+        self.has_video = False
+        self.has_audio = False
+        self.formats = {}  # Will store available formats
+        
+    def clear(self):
+        """Clear all context data."""
+        self.__init__()
+        
+    def update_from_info(self, info):
+        """Update context with extracted info."""
+        try:
+            self.info = info
+            self.title = remove_hashtags_mentions(info.get('title', 'Untitled'))
+            self.has_video = info.get('vcodec') != 'none'
+            self.has_audio = info.get('acodec') != 'none'
+            
+            # Extract available formats
+            if 'formats' in info:
+                self.process_formats(info['formats'])
+            else:
+                raise ValueError("No format information available")
+                
+        except Exception as e:
+            logger.error(f"Error updating from info: {e}")
+            raise ValueError(f"Failed to process video information: {str(e)}")
+    
+    def process_formats(self, formats):
+        """Process and categorize available formats."""
+        video_formats = []
+        audio_formats = []
+        
+        for fmt in formats:
+            try:
+                if fmt.get('vcodec', 'none') != 'none' and fmt.get('acodec', 'none') != 'none':
+                    # This is a format with both video and audio
+                    height = fmt.get('height', 0)
+                    file_size = fmt.get('filesize') or fmt.get('filesize_approx', 0)
+                    tbr = fmt.get('tbr', 0)  # Total bitrate
+                    format_id = fmt.get('format_id', '')
+                    format_note = fmt.get('format_note', '')
+                    ext = fmt.get('ext', 'mp4')
+                    
+                    # Only add if we have valid height and reasonable bitrate
+                    if height and tbr > 0:
+                        video_formats.append({
+                            'format_id': format_id,
+                            'ext': ext,
+                            'height': int(height),  # Ensure height is an integer
+                            'file_size': int(file_size) if file_size else 0,
+                            'tbr': float(tbr) if tbr else 0,
+                            'format_note': format_note
+                        })
+                    
+                elif fmt.get('acodec', 'none') != 'none' and fmt.get('vcodec', 'none') == 'none':
+                    # This is an audio-only format
+                    file_size = fmt.get('filesize') or fmt.get('filesize_approx', 0)
+                    abr = fmt.get('abr', 0)  # Audio bitrate
+                    format_id = fmt.get('format_id', '')
+                    
+                    if abr:  # Only add if we have valid audio bitrate
+                        audio_formats.append({
+                            'format_id': format_id,
+                            'ext': fmt.get('ext', 'mp3'),
+                            'abr': float(abr) if abr else 0,
+                            'file_size': int(file_size) if file_size else 0
+                        })
+            except Exception as e:
+                logger.error(f"Error processing format: {e}")
+                continue
+        
+        if not video_formats and not audio_formats:
+            logger.error("No valid formats found")
+            raise ValueError("No valid formats found for this video")
+        
+        # Sort video formats by resolution and bitrate
+        video_formats.sort(key=lambda x: (x['height'], x['tbr']), reverse=True)
+        
+        # Sort audio formats by bitrate
+        audio_formats.sort(key=lambda x: x['abr'], reverse=True)
+        
+        # Initialize format dictionaries
+        self.formats = {
+            'video': {'high': None, 'medium': None, 'low': None},
+            'audio': {'high': None, 'medium': None, 'low': None}
+        }
+        
+        # Categorize video formats based on resolution
+        if video_formats:
+            try:
+                # High quality: 1080p or best available
+                self.formats['video']['high'] = next(
+                    (f for f in video_formats if f['height'] >= 1080),
+                    next(
+                        (f for f in video_formats if f['height'] >= 720),
+                        video_formats[0] if video_formats else None
+                    )
+                )
+                
+                # Medium quality: 720p or closest below
+                self.formats['video']['medium'] = next(
+                    (f for f in video_formats if f['height'] <= 720),
+                    next(
+                        (f for f in video_formats if f['height'] <= 1080),
+                        video_formats[-1] if video_formats else None
+                    )
+                )
+                
+                # Low quality: 480p or closest below
+                self.formats['video']['low'] = next(
+                    (f for f in video_formats if f['height'] <= 480),
+                    next(
+                        (f for f in video_formats if f['height'] <= 720),
+                        video_formats[-1] if video_formats else None
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error categorizing video formats: {e}")
+                # Fallback to simple categorization
+                if len(video_formats) >= 3:
+                    self.formats['video']['high'] = video_formats[0]
+                    self.formats['video']['medium'] = video_formats[len(video_formats)//2]
+                    self.formats['video']['low'] = video_formats[-1]
+                elif len(video_formats) == 2:
+                    self.formats['video']['high'] = video_formats[0]
+                    self.formats['video']['medium'] = self.formats['video']['low'] = video_formats[1]
+                elif len(video_formats) == 1:
+                    self.formats['video']['high'] = self.formats['video']['medium'] = self.formats['video']['low'] = video_formats[0]
+        
+        # Categorize audio formats based on bitrate
+        if audio_formats:
+            try:
+                # High quality: 256kbps or best available
+                self.formats['audio']['high'] = next(
+                    (f for f in audio_formats if f['abr'] >= 256),
+                    audio_formats[0] if audio_formats else None
+                )
+                
+                # Medium quality: 192kbps or closest available
+                self.formats['audio']['medium'] = next(
+                    (f for f in audio_formats if 128 <= f['abr'] < 256),
+                    self.formats['audio']['high']
+                )
+                
+                # Low quality: 128kbps or lowest available
+                self.formats['audio']['low'] = next(
+                    (f for f in audio_formats if f['abr'] <= 128),
+                    self.formats['audio']['medium']
+                )
+            except Exception as e:
+                logger.error(f"Error categorizing audio formats: {e}")
+                # Fallback to simple categorization
+                if len(audio_formats) >= 3:
+                    self.formats['audio']['high'] = audio_formats[0]
+                    self.formats['audio']['medium'] = audio_formats[len(audio_formats)//2]
+                    self.formats['audio']['low'] = audio_formats[-1]
+                elif len(audio_formats) == 2:
+                    self.formats['audio']['high'] = audio_formats[0]
+                    self.formats['audio']['medium'] = self.formats['audio']['low'] = audio_formats[1]
+                elif len(audio_formats) == 1:
+                    self.formats['audio']['high'] = self.formats['audio']['medium'] = self.formats['audio']['low'] = audio_formats[0]
+        
+        # Log available formats
+        logger.info("Available video formats:")
+        for quality, fmt in self.formats['video'].items():
+            if fmt:
+                logger.info(f"{quality}: {fmt['height']}p ({format_file_size(fmt['file_size'])})")
+        
+        logger.info("Available audio formats:")
+        for quality, fmt in self.formats['audio'].items():
+            if fmt:
+                logger.info(f"{quality}: {fmt['abr']}kbps ({format_file_size(fmt['file_size'])})")
+
 # Telegram Bot
 class TelegramYTDLBot:
     def __init__(self):
@@ -742,6 +873,9 @@ class TelegramYTDLBot:
         self.translation = None  # Will be initialized later
         self.cobalt = None  # Will be initialized later
         self.user_prefs = None  # Will be initialized later
+        
+        # Download contexts for active downloads - keyed by user_id
+        self.download_contexts = {}
         
         # TikTok special arguments
         self.tiktok_args = [
@@ -1029,767 +1163,101 @@ class TelegramYTDLBot:
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle the /start command."""
         debug_write(f"Received /start command from user {update.effective_user.id}")
-        await update.message.reply_text("🎵 Hello! Send me a link from YouTube, Spotify, TikTok, Twitter, SoundCloud and more - I'll download the audio for you!")
+        await update.message.reply_text("Hello! Send me a video URL to download.")
 
     async def handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle the /help command."""
         debug_write(f"Received /help command from user {update.effective_user.id}")
-        help_text = """🎵 *Audio Downloader Bot*
-
-Send me a link and I'll extract the audio for you!
-
-*✅ Fully Supported Platforms:*
-• 🎥 YouTube & YouTube Music
-• 🎬 TikTok
-• � Twitter/X
-• 🎧 SoundCloud
-• 📺 Vimeo, Dailymotion, Twitch
-• 📘 Facebook (public videos)
-
-*⚠️ Limited Support:*
-• 📸 Instagram (requires login/cookies)
-• � Spotify (DRM protected - not downloadable)
-
-*Audio Quality Options:*
-• High (320kbps) • Medium (192kbps) • Low (128kbps)
-
-Just send me a link to get started! 🎧"""
-        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("Send me a video URL to download.")
 
     async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle text messages without URLs."""
         debug_write(f"Received text message from user {update.effective_user.id}")
-        await update.message.reply_text("🎵 Please send me a link from YouTube, TikTok, Twitter, SoundCloud or other supported platforms to download audio.")
+        await update.message.reply_text("Please send me a video URL to download.")
 
     async def handle_url_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle messages with URLs."""
         debug_write(f"Received URL message from user {update.effective_user.id}")
-
-        # Check if user is whitelisted
-        if not await self.is_whitelisted(update):
-            await self.handle_denied_user(update, context)
-            return
-
-        # Extract URL from message
-        url = None
-        for entity in update.message.entities:
-            if entity.type == "url":
-                url = update.message.text[entity.offset:entity.offset + entity.length]
-                break
-
-        if not url:
-            await update.message.reply_text("❌ No valid URL found in your message.")
-            return
-
-        # Validate URL and detect platform
-        platform = detect_platform(url)
-
-        if is_limited_support_url(url):
-            # Handle platforms with limited support
-            if platform == 'Instagram':
-                await update.message.reply_text(
-                    f"📸 *Instagram Support Limited*\n\n"
-                    f"❌ Instagram requires login/cookies for most content.\n\n"
-                    f"💡 *Alternatives:*\n"
-                    f"• Use a browser extension to download\n"
-                    f"• Try screen recording for stories\n"
-                    f"• Use Instagram's built-in save feature\n\n"
-                    f"✅ *Try these platforms instead:*\n"
-                    f"• YouTube, TikTok, Twitter, SoundCloud",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-
-            return
-        elif not is_supported_url(url):
-            await update.message.reply_text(
-                f"❌ Sorry, {platform} is not supported.\n\n"
-                f"✅ *Supported platforms:*\n"
-                f"• YouTube & YouTube Music\n"
-                f"• Spotify (tracks, albums, playlists)\n"
-                f"• TikTok, Twitter/X\n"
-                f"• SoundCloud, Vimeo\n"
-                f"• Facebook, Dailymotion, Twitch"
-            )
-            return
-
-        # Start audio download process
-        await self.start_audio_download(update, url)
-
-    async def start_audio_download(self, update: Update, url: str):
-        """Start the audio download process."""
-        user_id = update.effective_user.id
-        username = update.effective_user.username or update.effective_user.first_name or "Unknown"
-        platform = detect_platform(url)
-
-        # Log the download request with platform info
-        user_logger.info(f"DOWNLOAD REQUEST | User: {username} ({user_id}) | Platform: {platform} | URL: {url}")
-        debug_write(f"Starting audio download for {platform} - {url}")
-
-        # Send initial processing message with platform info
-        processing_msg = await update.message.reply_text(f"🎵 Processing {platform} link...")
-
-        try:
-            # Extract audio info
-            debug_write(f"Extracting audio info for {platform}")
-            info = await self.extract_audio_info(url)
-            debug_write(f"Audio info extracted: {info}")
-
-            if not info:
-                debug_write(f"No info extracted for {platform} URL: {url}")
-                platform_specific_msg = self.get_platform_error_message(platform)
-                await processing_msg.edit_text(f"❌ Could not extract information from this {platform} link.\n\n{platform_specific_msg}")
-                return
-
-            # For Spotify, auto-download with high quality to improve user experience
-            if platform == 'Spotify':
-                debug_write(f"Auto-downloading Spotify with high quality")
-                await processing_msg.edit_text("🎵 Starting Spotify download with high quality...")
-
-                # Get user info for logging
-                user_id = update.effective_user.id
-                username = update.effective_user.username or update.effective_user.first_name or "Unknown"
-
-                # Log auto-selection
-                user_logger.info(f"AUDIO QUALITY SELECTED | User: {username} ({user_id}) | Platform: {platform} | Quality: high (auto) | URL: {url}")
-
-                # Create a mock query object for the download function
-                class MockQuery:
-                    def __init__(self, message):
-                        self.message = message
-
-                    async def edit_message_text(self, text):
-                        await self.message.edit_text(text)
-
-                mock_query = MockQuery(processing_msg)
-                await self.download_spotify_audio(mock_query, url, "high", username, user_id)
-            else:
-                # Show audio quality options for other platforms
-                debug_write(f"Showing quality options for {platform}")
-                await self.show_audio_quality_options(update, processing_msg, url, info)
-
-        except Exception as e:
-            debug_write(f"Error in start_audio_download for {platform}: {e}")
-            platform_specific_msg = self.get_platform_error_message(platform)
-            await processing_msg.edit_text(f"❌ An error occurred while processing your {platform} request.\n\n{platform_specific_msg}")
-
-    def get_platform_error_message(self, platform: str) -> str:
-        """Get platform-specific error message and tips."""
-        messages = {
-            'Instagram': "❌ Instagram requires login/cookies. This platform has limited support.\n💡 Try using YouTube or TikTok instead.",
-            'Spotify': "💡 Tips for Spotify:\n• Make sure the track/playlist is public\n• Bot searches for tracks on YouTube\n• Some region-locked content may not be available",
-            'YouTube': "💡 Tips for YouTube:\n• Check if the video is public\n• Age-restricted content may not work\n• Live streams are not supported",
-            'TikTok': "💡 Tips for TikTok:\n• Make sure the video is public\n• Private accounts may not work",
-            'Twitter/X': "💡 Tips for Twitter/X:\n• Make sure the tweet is public\n• Protected accounts may not work",
-            'SoundCloud': "💡 Tips for SoundCloud:\n• Make sure the track is public\n• Private tracks may not work",
-            'Vimeo': "💡 Tips for Vimeo:\n• Check if the video is public\n• Password-protected videos won't work",
-            'Facebook': "💡 Tips for Facebook:\n• Make sure the video is public\n• Private posts may not work"
-        }
-        return messages.get(platform, "💡 Please check if the link is valid and publicly accessible.")
-
-    async def extract_audio_info(self, url: str):
-        """Extract basic info from the URL with platform-specific handling."""
-        try:
-            import yt_dlp
-            platform = detect_platform(url)
-
-            # Platform-specific options
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,
-            }
-
-            # Add platform-specific configurations
-            if platform == 'Instagram':
-                ydl_opts.update({
-                    'extractor_args': {
-                        'instagram': {
-                            'include_stories': True,
-                        }
-                    }
-                })
-            elif platform == 'Spotify':
-                # For Spotify, we'll extract metadata using our custom function
-                return await self.extract_spotify_info_for_display(url)
-            elif platform == 'TikTok':
-                ydl_opts.update({
-                    'extractor_args': {
-                        'tiktok': {
-                            'api_hostname': 'api16-normal-c-useast1a.tiktokv.com',
-                        }
-                    }
-                })
-
-            # Add cookie file if available
-            if env.COOKIE_FILE.exists():
-                ydl_opts['cookiefile'] = str(env.COOKIE_FILE)
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ydl.extract_info(url, download=False)
-                )
-
-            # Extract platform-specific information
-            title = info.get('title', 'Unknown Title')
-            uploader = info.get('uploader', info.get('channel', info.get('artist', 'Unknown')))
-            duration = info.get('duration', 0)
-
-            # For Spotify, try to get additional metadata
-            if platform == 'Spotify':
-                title = info.get('track', info.get('title', title))
-                uploader = info.get('artist', info.get('uploader', uploader))
-
-            return {
-                'title': title,
-                'duration': duration,
-                'uploader': uploader,
-                'platform': platform,
-                'url': url
-            }
-
-        except Exception as e:
-            debug_write(f"Error extracting info from {detect_platform(url)}: {e}")
-            return None
-
-    async def extract_spotify_info_for_display(self, url: str):
-        """Extract Spotify info for display purposes only."""
-        try:
-            debug_write(f"Extracting Spotify info for display: {url}")
-            track_id = self.extract_spotify_track_id(url)
-            debug_write(f"Extracted track ID: {track_id}")
-
-            if not track_id:
-                debug_write("No track ID found, returning default info")
-                return {
-                    'title': 'Spotify Track',
-                    'duration': 0,
-                    'uploader': 'Spotify',
-                    'platform': 'Spotify',
-                    'url': url
-                }
-
-            # Try to get metadata for display
-            debug_write(f"Getting metadata for track ID: {track_id}")
-            metadata = await self.get_spotify_track_metadata(track_id)
-            debug_write(f"Metadata result: {metadata}")
-
-            if metadata:
-                result = {
-                    'title': metadata['title'],
-                    'duration': 0,  # We don't have duration info
-                    'uploader': metadata['artist'],
-                    'platform': 'Spotify',
-                    'url': url
-                }
-                debug_write(f"Returning metadata result: {result}")
-                return result
-            else:
-                debug_write("No metadata found, returning default info")
-                return {
-                    'title': 'Spotify Track',
-                    'duration': 0,
-                    'uploader': 'Unknown Artist',
-                    'platform': 'Spotify',
-                    'url': url
-                }
-        except Exception as e:
-            debug_write(f"Error extracting Spotify info for display: {e}")
-            return {
-                'title': 'Spotify Track',
-                'duration': 0,
-                'uploader': 'Spotify',
-                'platform': 'Spotify',
-                'url': url
-            }
-
-    async def show_audio_quality_options(self, update: Update, message, url: str, info: dict):
-        """Show audio quality selection buttons."""
-        title = info['title']
-        platform = info.get('platform', 'Unknown Platform')
-        uploader = info.get('uploader', 'Unknown')
-        duration = info.get('duration', 0)
-
-        if duration and isinstance(duration, (int, float)):
-            duration = int(duration)  # Convert to int to avoid float formatting issues
-            duration_str = f"{duration // 60}:{duration % 60:02d}"
-        else:
-            duration_str = "Unknown"
-
-        # Platform emoji mapping
-        platform_emojis = {
-            'YouTube': '🎥',
-            'Instagram': '📸',
-            'Spotify': '🎵',
-            'TikTok': '🎬',
-            'Twitter/X': '🐦',
-            'SoundCloud': '🎧',
-            'Facebook': '📘'
-        }
-
-        platform_emoji = platform_emojis.get(platform, '🎵')
-
-        text = f"{platform_emoji} *{title}*\n\n👤 {uploader}\n⏱ Duration: {duration_str}\n🌐 Platform: {platform}\n\nChoose audio quality:"
-
-        keyboard = [
-            [InlineKeyboardButton("🔊 High Quality (320kbps)", callback_data=f"{CallbackPrefix.AUDIO_QUALITY}high:{url}")],
-            [InlineKeyboardButton("🎵 Medium Quality (192kbps)", callback_data=f"{CallbackPrefix.AUDIO_QUALITY}medium:{url}")],
-            [InlineKeyboardButton("📻 Low Quality (128kbps)", callback_data=f"{CallbackPrefix.AUDIO_QUALITY}low:{url}")],
-            [InlineKeyboardButton("❌ Cancel", callback_data=CallbackPrefix.CANCEL)]
-        ]
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+        await update.message.reply_text("I received your URL, but downloading is not implemented yet.")
 
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries from inline buttons."""
         query = update.callback_query
         await query.answer()
-
+        
         data = query.data
         user_id = update.effective_user.id
-        username = update.effective_user.username or update.effective_user.first_name or "Unknown"
-
+        
         # Log the user's selection
-        user_logger.info(f"BUTTON SELECTION | User: {username} ({user_id}) | Selection: {data}")
-
+        user_logger.info(
+            f"BUTTON SELECTION | User: {user_id} | "
+            f"Selection: {data}"
+        )
+        
+        # Check if we have a download context for this user
+        if user_id not in self.download_contexts:
+            await query.edit_message_text(
+                text="Your session has expired. Please send the URL again."
+            )
+            return
+            
+        download_context = self.download_contexts[user_id]
+        
         # Process different callback types
-        if data.startswith(CallbackPrefix.AUDIO_QUALITY):
-            # Parse quality and URL from callback data
-            parts = data[len(CallbackPrefix.AUDIO_QUALITY):].split(":", 1)
-            if len(parts) != 2:
-                await query.edit_message_text("❌ Invalid selection. Please try again.")
-                return
-
-            quality, url = parts
-
+        if data.startswith(CallbackPrefix.FORMAT):
+            format_type = data[len(CallbackPrefix.FORMAT):]
+            
+            if format_type == "back":
+                # Go back to format selection
+                await self.show_format_options(download_context)
+            elif format_type in ["video", "audio"]:
+                # Save format preference for user
+                await self.user_prefs.set_user_preference(user_id, "preferred_format", format_type)
+                
+                # Log user preference
+                user_logger.info(
+                    f"FORMAT PREFERENCE | User: {user_id} | "
+                    f"Preferred Format: {format_type}"
+                )
+                
+                # Show quality options for selected format
+                await self.show_quality_options(download_context, format_type)
+                
+        elif data.startswith(CallbackPrefix.VIDEO_QUALITY):
+            quality = data[len(CallbackPrefix.VIDEO_QUALITY):]
+            
+            # Save quality preference for user
+            await self.user_prefs.set_user_preference(user_id, "preferred_video_quality", quality)
+            
+            # Download video with selected quality
+            await query.answer("Starting download...")
+            await self.download_media(download_context, "video", quality)
+            
+        elif data.startswith(CallbackPrefix.AUDIO_QUALITY):
+            quality = data[len(CallbackPrefix.AUDIO_QUALITY):]
+            
             # Save quality preference for user
             await self.user_prefs.set_user_preference(user_id, "preferred_audio_quality", quality)
-
-            # Log user preference and start download
-            platform = detect_platform(url)
-            user_logger.info(f"AUDIO QUALITY SELECTED | User: {username} ({user_id}) | Platform: {platform} | Quality: {quality} | URL: {url}")
-
-            # Start audio download
-            await query.answer(f"🎵 Starting {platform} audio download...")
-            await self.download_audio(query, url, quality, username, user_id)
-
+            
+            # Download audio with selected quality
+            await query.answer("Starting download...")
+            await self.download_media(download_context, "audio", quality)
+            
         elif data == CallbackPrefix.CANCEL:
             # Cancel download
             await query.answer("Download canceled")
-            await query.edit_message_text("❌ Download canceled")
+            
+            await self.bot.edit_message_text(
+                chat_id=download_context.chat_id,
+                message_id=download_context.message_id,
+                text="<b>Download canceled</b>",
+                parse_mode=ParseMode.HTML
+            )
+            
+            # Clear the download context
+            del self.download_contexts[user_id]
         else:
             await query.answer("Unknown option")
-
-    async def download_audio(self, query, url: str, quality: str, username: str, user_id: int):
-        """Download audio from the given URL with platform-specific handling."""
-        start_time = time.time()
-        platform = detect_platform(url)
-
-        try:
-            # Update message to show downloading status
-            await query.edit_message_text(f"🎵 Downloading {platform} audio... Please wait.")
-
-            # Create temp directory if it doesn't exist
-            temp_dir = env.STORAGE_DIR / "temp"
-            temp_dir.mkdir(exist_ok=True)
-
-            # Generate unique filename
-            temp_filename = f"audio_{platform.lower().replace('/', '_')}_{int(time.time())}_{user_id}"
-            temp_filepath = temp_dir / temp_filename
-
-            # Set quality-specific options
-            quality_map = {
-                "high": "320",
-                "medium": "192",
-                "low": "128"
-            }
-
-            # Prepare download options for audio only
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': f"{str(temp_filepath)}.%(ext)s",
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': quality_map.get(quality, '192'),
-                }],
-                'quiet': True,
-                'no_warnings': True,
-                'noprogress': True,
-            }
-
-            # Add platform-specific configurations
-            if platform == 'Instagram':
-                ydl_opts.update({
-                    'extractor_args': {
-                        'instagram': {
-                            'include_stories': True,
-                        }
-                    }
-                })
-            elif platform == 'TikTok':
-                ydl_opts.update({
-                    'extractor_args': {
-                        'tiktok': {
-                            'api_hostname': 'api16-normal-c-useast1a.tiktokv.com',
-                        }
-                    }
-                })
-            elif platform == 'Spotify':
-                # For Spotify, we'll use a different approach with spotdl-like functionality
-                return await self.download_spotify_audio(query, url, quality, username, user_id)
-            elif platform == 'SoundCloud':
-                # SoundCloud specific options
-                ydl_opts.update({
-                    'extractor_args': {
-                        'soundcloud': {
-                            'client_id': None,  # Let yt-dlp handle this
-                        }
-                    }
-                })
-
-            # Add FFmpeg location if available
-            if self.ffmpeg_path:
-                ydl_opts['ffmpeg_location'] = self.ffmpeg_path
-
-            # Add cookie file if available
-            if env.COOKIE_FILE.exists():
-                ydl_opts['cookiefile'] = str(env.COOKIE_FILE)
-
-            download_start = time.time()
-            logger.info(f"Starting audio download for user {username} ({user_id})")
-
-            # Download the audio
-            import yt_dlp
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ydl.extract_info(url, download=True)
-                )
-
-            download_time = time.time() - download_start
-
-            # Find the downloaded file
-            downloaded_files = list(temp_dir.glob(f"{temp_filename}.*"))
-            if not downloaded_files:
-                raise FileNotFoundError("Download failed - no file found")
-
-            downloaded_file = downloaded_files[0]
-            file_size_mb = downloaded_file.stat().st_size / (1024 * 1024)
-
-            # Log successful download
-            title = info.get('title', 'Unknown Title')
-            user_logger.info(f"DOWNLOAD COMPLETE | User: {username} ({user_id}) | Platform: {platform} | Title: {title} | URL: {url} | Quality: {quality} | Size: {file_size_mb:.2f}MB | Time: {download_time:.1f}s")
-
-            # Send the audio file
-            await query.edit_message_text("📤 Uploading audio file...")
-
-            with open(downloaded_file, 'rb') as audio_file:
-                await query.message.reply_audio(
-                    audio=audio_file,
-                    title=title,
-                    performer=info.get('uploader', 'Unknown'),
-                    duration=info.get('duration'),
-                    caption=f"🎵 {title}\n\n📊 Quality: {quality_map.get(quality, '192')}kbps\n📁 Size: {file_size_mb:.1f}MB"
-                )
-
-            # Clean up
-            downloaded_file.unlink()
-            await query.edit_message_text(f"✅ Audio download completed!\n\n🎵 {title}")
-
-            total_time = time.time() - start_time
-            logger.info(f"Audio download completed for {username} ({user_id}) in {total_time:.1f}s")
-
-        except Exception as e:
-            error_msg = f"❌ {platform} download failed: {str(e)}"
-            debug_write(f"Error downloading audio from {platform}: {e}")
-            user_logger.error(f"DOWNLOAD FAILED | User: {username} ({user_id}) | Platform: {platform} | URL: {url} | Error: {str(e)}")
-
-            try:
-                await query.edit_message_text(error_msg)
-            except:
-                await query.message.reply_text(error_msg)
-
-    async def download_spotify_audio(self, query, url: str, quality: str, username: str, user_id: int):
-        """Download Spotify audio using spotdl command-line tool."""
-        start_time = time.time()
-
-        try:
-            # Update message to show downloading status
-            await query.edit_message_text("🎵 Processing Spotify link...")
-
-            # Create temp directory if it doesn't exist
-            temp_dir = env.STORAGE_DIR / "temp"
-            temp_dir.mkdir(exist_ok=True)
-
-            # Generate unique output directory for this download
-            output_dir = temp_dir / f"spotify_{int(time.time())}_{user_id}"
-            output_dir.mkdir(exist_ok=True)
-
-            # Set quality-specific options
-            quality_map = {
-                "high": "320",
-                "medium": "192",
-                "low": "128"
-            }
-
-            bitrate = quality_map.get(quality, '192')
-
-            # Prepare spotdl command
-            spotdl_cmd = [
-                "spotdl",
-                "--bitrate", f"{bitrate}k",
-                "--format", "mp3",
-                "--output", str(output_dir),
-                url
-            ]
-
-            await query.edit_message_text("🎵 Downloading with spotdl...")
-
-            download_start = time.time()
-            logger.info(f"Starting spotdl download for user {username} ({user_id})")
-
-            # Run spotdl command
-            import subprocess
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    spotdl_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,  # 5 minute timeout
-                    cwd=str(output_dir)
-                )
-            )
-
-            download_time = time.time() - download_start
-
-            if result.returncode != 0:
-                error_output = result.stderr or result.stdout
-                raise Exception(f"spotdl failed: {error_output}")
-
-            # Find the downloaded file
-            downloaded_files = list(output_dir.glob("*.mp3"))
-            if not downloaded_files:
-                raise FileNotFoundError("Download failed - no MP3 file found")
-
-            downloaded_file = downloaded_files[0]
-            file_size_mb = downloaded_file.stat().st_size / (1024 * 1024)
-
-            # Extract title and artist from filename or spotdl output
-            filename = downloaded_file.stem
-            if " - " in filename:
-                parts = filename.split(" - ", 1)
-                artist = parts[0].strip()
-                title = parts[1].strip()
-            else:
-                title = filename
-                artist = "Unknown Artist"
-
-            # Log successful download
-            full_title = f"{artist} - {title}"
-            user_logger.info(f"DOWNLOAD COMPLETE | User: {username} ({user_id}) | Platform: Spotify | Title: {full_title} | URL: {url} | Quality: {quality} | Size: {file_size_mb:.2f}MB | Time: {download_time:.1f}s")
-
-            # Send the audio file
-            await query.edit_message_text("📤 Uploading audio file...")
-
-            with open(downloaded_file, 'rb') as audio_file:
-                await query.message.reply_audio(
-                    audio=audio_file,
-                    title=title,
-                    performer=artist,
-                    caption=f"🎵 {full_title}\n\n📊 Quality: {bitrate}kbps\n📁 Size: {file_size_mb:.1f}MB\n🎧 Source: Spotify (via spotdl)"
-                )
-
-            # Clean up
-            import shutil
-            shutil.rmtree(output_dir)
-            await query.edit_message_text(f"✅ Spotify download completed!\n\n🎵 {full_title}")
-
-            total_time = time.time() - start_time
-            logger.info(f"Spotify download completed for {username} ({user_id}) in {total_time:.1f}s")
-
-        except subprocess.TimeoutExpired:
-            error_msg = "❌ Spotify download timed out (5 minutes). The track might be too long or there's a network issue."
-            debug_write(f"Spotify download timeout for user {username} ({user_id})")
-            user_logger.error(f"DOWNLOAD TIMEOUT | User: {username} ({user_id}) | Platform: Spotify | URL: {url}")
-
-            try:
-                await query.edit_message_text(error_msg)
-            except:
-                await query.message.reply_text(error_msg)
-
-        except Exception as e:
-            error_msg = f"❌ Spotify download failed: {str(e)}"
-            debug_write(f"Error downloading Spotify audio: {e}")
-            user_logger.error(f"DOWNLOAD FAILED | User: {username} ({user_id}) | Platform: Spotify | URL: {url} | Error: {str(e)}")
-
-            try:
-                await query.edit_message_text(error_msg)
-            except:
-                await query.message.reply_text(error_msg)
-
-        finally:
-            # Clean up output directory if it still exists
-            try:
-                if 'output_dir' in locals() and output_dir.exists():
-                    import shutil
-                    shutil.rmtree(output_dir)
-            except:
-                pass
-
-    async def extract_spotify_metadata(self, url: str):
-        """Extract metadata from Spotify URL using web scraping approach."""
-        try:
-            # First try to get metadata from Spotify's public API endpoint
-            track_id = self.extract_spotify_track_id(url)
-            if not track_id:
-                return self.parse_spotify_url_fallback(url)
-
-            # Try to get metadata from Spotify's public endpoint
-            metadata = await self.get_spotify_track_info(track_id)
-            if metadata:
-                return metadata
-
-            # Fallback: try to parse from URL
-            return self.parse_spotify_url_fallback(url)
-
-        except Exception as e:
-            debug_write(f"Error extracting Spotify metadata: {e}")
-            # Fallback: try to parse from URL
-            return self.parse_spotify_url_fallback(url)
-
-    def extract_spotify_track_id(self, url: str):
-        """Extract track ID from Spotify URL."""
-        try:
-            import re
-            # Match track URLs
-            track_match = re.search(r'/track/([a-zA-Z0-9]+)', url)
-            if track_match:
-                return track_match.group(1)
-            return None
-        except Exception as e:
-            debug_write(f"Error extracting Spotify track ID: {e}")
-            return None
-
-    async def get_spotify_track_metadata(self, track_id: str):
-        """Get track metadata using web scraping approach."""
-        try:
-            import requests
-            import re
-
-            # Try to get basic info from Spotify's public page
-            track_url = f"https://open.spotify.com/track/{track_id}"
-
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-
-            response = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: requests.get(track_url, headers=headers, timeout=10)
-            )
-
-            if response.status_code == 200:
-                html = response.text
-
-                # Try to extract title and artist from meta tags
-                # Look for Open Graph tags
-                title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
-                description_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
-
-                if title_match:
-                    title = title_match.group(1)
-                    artist = "Unknown Artist"
-
-                    # Try to extract artist from description
-                    if description_match:
-                        description = description_match.group(1)
-                        # Description often contains "Song · Artist · Year"
-                        if ' · ' in description:
-                            parts = description.split(' · ')
-                            if len(parts) >= 2:
-                                artist = parts[1]
-
-                    return {
-                        'title': title.strip(),
-                        'artist': artist.strip(),
-                        'duration': 0,
-                        'album': '',
-                        'url': track_url,
-                        'track_id': track_id
-                    }
-
-                # Fallback: try to extract from page title
-                title_match = re.search(r'<title[^>]*>([^<]+)</title>', html)
-                if title_match:
-                    title_text = title_match.group(1)
-                    # Remove " | Spotify" from the end
-                    title_text = title_text.replace(' | Spotify', '')
-
-                    # Try to split by common separators
-                    if ' - ' in title_text:
-                        parts = title_text.split(' - ', 1)
-                        return {
-                            'title': parts[0].strip(),
-                            'artist': parts[1].strip() if len(parts) > 1 else 'Unknown Artist',
-                            'duration': 0,
-                            'album': '',
-                            'url': track_url,
-                            'track_id': track_id
-                        }
-
-            return None
-
-        except Exception as e:
-            debug_write(f"Error getting Spotify track metadata: {e}")
-            return None
-
-    def parse_spotify_url_fallback(self, url: str):
-        """Fallback method to parse Spotify URL when API fails."""
-        try:
-            # Extract track ID from URL
-            track_id = self.extract_spotify_track_id(url)
-            if track_id:
-                # Return basic info that will allow the search to proceed
-                return {
-                    'title': 'Spotify Track',
-                    'artist': 'Unknown Artist',
-                    'duration': 0,
-                    'album': '',
-                    'url': url,
-                    'track_id': track_id
-                }
-        except Exception as e:
-            debug_write(f"Error in Spotify URL fallback parsing: {e}")
-
-        return None
-
-    async def search_youtube_for_spotify_track(self, search_query: str):
-        """Search YouTube for a Spotify track."""
-        try:
-            import yt_dlp
-
-            # Search YouTube for the track
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'default_search': 'ytsearch1:',  # Search for 1 result
-            }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                search_results = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ydl.extract_info(search_query, download=False)
-                )
-
-            # Get the first result
-            if search_results and 'entries' in search_results and search_results['entries']:
-                first_result = search_results['entries'][0]
-                return first_result.get('webpage_url', first_result.get('url'))
-
-            return None
-
-        except Exception as e:
-            debug_write(f"Error searching YouTube for Spotify track: {e}")
-            return None
 
     async def handle_denied_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle non-whitelisted users."""
@@ -1858,9 +1326,369 @@ Just send me a link to get started! 🎧"""
         
         debug_write("Handlers set up successfully")
 
+    async def download_media(self, context: DownloadContext, format_type: str, quality: str):
+        """Download media in the specified format and quality."""
+        start_time = time.time()
+        
+        try:
+            # Log download start
+            user_logger.info(
+                f"DOWNLOAD START | User: {context.user_id} | "
+                f"URL: {context.url} | "
+                f"Format: {format_type} | "
+                f"Quality: {quality} | "
+                f"Title: {context.title}"
+            )
+            
+            # Update message to show downloading status
+            await self.bot.edit_message_text(
+                chat_id=context.chat_id,
+                message_id=context.message_id,
+                text=f"<b>{context.title}</b>\n\n{Text.DOWNLOADING}",
+                parse_mode=ParseMode.HTML
+            )
+            
+            # Create temp directory if it doesn't exist
+            temp_dir = env.STORAGE_DIR / "temp"
+            temp_dir.mkdir(exist_ok=True)
+            
+            # Generate unique filenames
+            temp_filename = f"{int(time.time())}_{context.user_id}"
+            temp_filepath = temp_dir / temp_filename
+            
+            # Prepare download options
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'noprogress': True,
+                'outtmpl': f"{str(temp_filepath)}.%(ext)s",
+            }
+            
+            # Add FFmpeg location if available
+            if self.ffmpeg_path:
+                ydl_opts['ffmpeg_location'] = self.ffmpeg_path
+            
+            # Get format ID for selected quality
+            format_id = None
+            if format_type in context.formats and quality in context.formats[format_type]:
+                format_data = context.formats[format_type][quality]
+                if format_data:
+                    format_id = format_data.get('format_id')
+                    
+            if not format_id and format_type == "video":
+                # Fallback to default format
+                format_id = "18"  # 360p MP4
+                
+            # Configure format-specific options
+            if format_type == "video":
+                ydl_opts.update({
+                    'format': f"{format_id}+bestaudio/best",  # Try to get best audio with video
+                    'merge_output_format': 'mp4',  # Force MP4 output
+                })
+                
+            else:  # audio
+                ydl_opts.update({
+                    'format': 'bestaudio/best',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                })
+            
+            # Add cookie file if available
+            if env.COOKIE_FILE.exists():
+                ydl_opts['cookiefile'] = str(env.COOKIE_FILE)
+                
+            download_start = time.time()
+            logger.info(f"Starting download with options: {ydl_opts}")
+            
+            # Download the file
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: ydl.download([context.url])
+                )
+            download_time = time.time() - download_start
+            
+            # Find the downloaded file
+            downloaded_files = list(temp_dir.glob(f"{temp_filename}.*"))
+            if not downloaded_files:
+                raise FileNotFoundError("Download failed - no file found")
+            
+            downloaded_file = downloaded_files[0]
+            file_extension = downloaded_file.suffix.lower()
+            
+            # Log file details
+            logger.info(f"File exists: {downloaded_file.exists()}")
+            logger.info(f"File size: {downloaded_file.stat().st_size} bytes")
+            logger.info(f"File path: {downloaded_file}")
+            logger.info(f"File extension: {file_extension}")
+            
+            # Log successful download to user log
+            file_size_mb = downloaded_file.stat().st_size / (1024 * 1024)
+            user_logger.info(
+                f"DOWNLOAD COMPLETE | User: {context.user_id} | "
+                f"URL: {context.url} | "
+                f"Format: {format_type} | "
+                f"Quality: {quality} | "
+                f"Size: {file_size_mb:.2f}MB | "
+                f"Duration: {download_time:.2f}s | "
+                f"Title: {context.title}"
+            )
+            
+            # Verify file size and content
+            if downloaded_file.stat().st_size < 1024:  # Less than 1KB
+                raise ValueError(f"Downloaded file is too small: {downloaded_file.stat().st_size} bytes")
+            
+            upload_start = time.time()
+            
+            # Read file into memory for upload
+            with open(downloaded_file, 'rb') as file:
+                file_data = file.read()
+                
+            if format_type == "video":
+                # Ensure we have a valid video file
+                if file_extension not in ['.mp4', '.mkv', '.avi', '.mov']:
+                    raise ValueError(f"Invalid video file format: {file_extension}")
+                
+                # Send as video
+                await self.bot.send_video(
+                    chat_id=context.chat_id,
+                    video=InputFile(file_data, filename=f"{context.title}.mp4"),
+                    caption=f"{context.title}\n\nProcessing time: {time.time() - start_time:.1f}s (Download: {download_time:.1f}s, Upload: {time.time() - upload_start:.1f}s)",
+                    supports_streaming=True,
+                    reply_to_message_id=context.message_id
+                )
+            else:  # audio
+                # Try to send as audio first
+                try:
+                    await self.bot.send_audio(
+                        chat_id=context.chat_id,
+                        audio=InputFile(file_data, filename=f"{context.title}.mp3"),
+                        title=context.title,
+                        performer="YouTube",  # You might want to extract this from metadata
+                        caption=f"Processing time: {time.time() - start_time:.1f}s (Download: {download_time:.1f}s, Upload: {time.time() - upload_start:.1f}s)",
+                        reply_to_message_id=context.message_id
+                    )
+                except Exception as e:
+                    logger.error(f"Error sending as audio, trying as document: {e}")
+                    # Fallback to document if audio fails
+                    await self.bot.send_document(
+                        chat_id=context.chat_id,
+                        document=InputFile(file_data, filename=f"{context.title}.mp3"),
+                        caption=f"Processing time: {time.time() - start_time:.1f}s (Download: {download_time:.1f}s, Upload: {time.time() - upload_start:.1f}s)",
+                        reply_to_message_id=context.message_id
+                    )
+                
+            # Delete the processing message
+            await self.bot.delete_message(
+                chat_id=context.chat_id,
+                message_id=context.message_id
+            )
+                
+        except Exception as e:
+            logger.error(f"Error downloading media: {e}")
+            # Log the full error details
+            import traceback
+            logger.error(f"Full error: {traceback.format_exc()}")
+            
+            # Log failed download to user log
+            user_logger.error(
+                f"DOWNLOAD FAILED | User: {context.user_id} | "
+                f"URL: {context.url} | "
+                f"Format: {format_type} | "
+                f"Quality: {quality} | "
+                f"Error: {str(e)}"
+            )
+            
+            await self.bot.edit_message_text(
+                chat_id=context.chat_id,
+                message_id=context.message_id,
+                text=f"<b>{context.title}</b>\n\n{Text.DOWNLOAD_FAILED}\n\nError: {str(e)}",
+                parse_mode=ParseMode.HTML
+            )
+        finally:
+            # Clean up files
+            try:
+                if downloaded_file and downloaded_file.exists():
+                    downloaded_file.unlink()
+                
+                # Clean up any remaining temp files
+                temp_dir = env.STORAGE_DIR / "temp"
+                for temp_file in temp_dir.glob(f"{temp_filename}.*"):
+                    try:
+                        temp_file.unlink()
+                    except:
+                        pass
+                        
+                # Clear the download context
+                del self.download_contexts[context.user_id]
+            except Exception as cleanup_error:
+                logger.error(f"Error during cleanup: {cleanup_error}")
 
+    async def process_url(self, url: str, context: DownloadContext):
+        """Process a URL to extract video information."""
+        try:
+            logger.info(f"Starting to process URL: {url}")
+            # Check if we should use Cobalt API for this URL
+            if self.cobalt and self.cobalt.matches_url(url):
+                logger.info("Using Cobalt API for processing")
+                # Process with Cobalt
+                info = await self.cobalt.resolve_url(url)
+                if info.get("status") != "error":
+                    # TODO: Process Cobalt response
+                    pass
+                
+            # Extract info with yt-dlp
+            args = ["--no-playlist", "--dump-json"]
+            logger.info("Extracting video info with yt-dlp")
+            
+            # Add cookie file if available
+            args.extend(env.get_cookie_args())
+            
+            # Add special args for TikTok
+            if context.is_tiktok:
+                args.extend(self.tiktok_args)
+            
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+                logger.info("Starting yt-dlp extraction")
+                info = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: ydl.extract_info(url, download=False)
+                )
+                logger.info("Video info extraction completed")
+                
+            # Update context with extracted info
+            context.update_from_info(info)
+            logger.info("Context updated with video info")
+            
+            # Log video information to user log
+            user_logger.info(
+                f"VIDEO INFO | User: {context.user_id} | "
+                f"Title: {context.title} | "
+                f"URL: {url} | "
+                f"Has Video: {context.has_video} | "
+                f"Has Audio: {context.has_audio}"
+            )
+            
+            # Show format selection buttons
+            await self.show_format_options(context)
+            logger.info("Format options displayed to user")
+            
+        except Exception as e:
+            logger.error(f"Error processing URL: {e}")
+            user_logger.error(
+                f"PROCESSING ERROR | User: {context.user_id} | "
+                f"URL: {url} | Error: {str(e)}"
+            )
+            
+            if context.processing_message:
+                await self.bot.edit_message_text(
+                    chat_id=context.chat_id,
+                    message_id=context.message_id,
+                    text=f"<b>Error processing URL:</b>\n{str(e)}",
+                    parse_mode=ParseMode.HTML
+                )
 
+    async def show_format_options(self, context: DownloadContext):
+        """Show available format options to the user."""
+        # Get user's preferred format
+        preferred_format = self.user_prefs.get_user_preference(context.user_id, "preferred_format")
+        
+        # Create format selection buttons
+        keyboard = []
+        
+        # Video button if video formats are available
+        if context.has_video:
+            keyboard.append([
+                InlineKeyboardButton(
+                    "🎥 Video" + (" (Preferred)" if preferred_format == "video" else ""),
+                    callback_data=f"{CallbackPrefix.FORMAT}video"
+                )
+            ])
+            
+        # Audio button if audio formats are available
+        if context.has_audio:
+            keyboard.append([
+                InlineKeyboardButton(
+                    "🎵 Audio" + (" (Preferred)" if preferred_format == "audio" else ""),
+                    callback_data=f"{CallbackPrefix.FORMAT}audio"
+                )
+            ])
+            
+        # Cancel button
+        keyboard.append([
+            InlineKeyboardButton("❌ Cancel", callback_data=CallbackPrefix.CANCEL)
+        ])
+        
+        # Update the processing message with format selection
+        await self.bot.edit_message_text(
+            chat_id=context.chat_id,
+            message_id=context.message_id,
+            text=f"<b>{context.title}</b>\n\n{Text.SELECT_FORMAT}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
 
+    async def show_quality_options(self, context: DownloadContext, format_type: str):
+        """Show available quality options for the selected format."""
+        keyboard = []
+        prefix = CallbackPrefix.VIDEO_QUALITY if format_type == "video" else CallbackPrefix.AUDIO_QUALITY
+        
+        # Get user's preferred quality
+        pref_key = "preferred_video_quality" if format_type == "video" else "preferred_audio_quality"
+        preferred_quality = self.user_prefs.get_user_preference(context.user_id, pref_key)
+        
+        # Quality labels with resolution/bitrate info
+        quality_labels = {
+            'video': {
+                'high': lambda f: f"High Quality ({f['height']}p)" if f else "High Quality",
+                'medium': lambda f: f"Medium Quality ({f['height']}p)" if f else "Medium Quality",
+                'low': lambda f: f"Low Quality ({f['height']}p)" if f else "Low Quality"
+            },
+            'audio': {
+                'high': lambda f: f"High Quality ({f['abr']}kbps)" if f else "High Quality",
+                'medium': lambda f: f"Medium Quality ({f['abr']}kbps)" if f else "Medium Quality",
+                'low': lambda f: f"Low Quality ({f['abr']}kbps)" if f else "Low Quality"
+            }
+        }
+        
+        # Add quality buttons if formats are available
+        for quality in ['high', 'medium', 'low']:
+            fmt = context.formats[format_type][quality]
+            if fmt:
+                # Get base label with quality info
+                base_label = quality_labels[format_type][quality](fmt)
+                
+                # Add preferred indicator if applicable
+                if preferred_quality == quality:
+                    base_label += " (Preferred)"
+                
+                # Add size if available
+                size = fmt.get('file_size', 0)
+                size_str = f" [{format_file_size(size)}]" if size else ""
+                
+                # Create button
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"{'🎥' if format_type == 'video' else '🎵'} {base_label}{size_str}",
+                        callback_data=f"{prefix}{quality}"
+                    )
+                ])
+        
+        # Back and Cancel buttons
+        keyboard.append([
+            InlineKeyboardButton("⬅️ Back", callback_data=f"{CallbackPrefix.FORMAT}back"),
+            InlineKeyboardButton("❌ Cancel", callback_data=CallbackPrefix.CANCEL)
+        ])
+        
+        # Update message with quality selection
+        await self.bot.edit_message_text(
+            chat_id=context.chat_id,
+            message_id=context.message_id,
+            text=f"<b>{context.title}</b>\n\n{Text.SELECT_QUALITY}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
 
 async def download_ffmpeg():
     """Download FFmpeg for the current platform."""
