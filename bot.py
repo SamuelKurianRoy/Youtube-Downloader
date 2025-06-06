@@ -1187,8 +1187,23 @@ Just send me a link to get started! 🎧"""
 
         except Exception as e:
             debug_write(f"Error in start_audio_download for {platform}: {e}")
-            platform_specific_msg = self.get_platform_error_message(platform)
-            await processing_msg.edit_text(f"❌ An error occurred while processing your {platform} request.\n\n{platform_specific_msg}")
+            # Log the full traceback for debugging
+            import traceback
+            debug_write(f"Full traceback: {traceback.format_exc()}")
+
+            # For Spotify, provide more specific error information
+            if platform == 'Spotify':
+                error_str = str(e).lower()
+                if "spotdl" in error_str:
+                    error_msg = f"❌ Spotify download failed: {e}\n\n💡 The bot is trying to use spotdl for Spotify downloads. This might be a temporary issue."
+                elif "extract" in error_str or "metadata" in error_str:
+                    error_msg = f"❌ Could not extract Spotify track information.\n\n💡 Tips:\n• Make sure the Spotify link is valid\n• Try a different track\n• The track might be region-locked"
+                else:
+                    error_msg = f"❌ Spotify processing failed: {e}\n\n💡 This might be a temporary issue. Please try again."
+                await processing_msg.edit_text(error_msg)
+            else:
+                platform_specific_msg = self.get_platform_error_message(platform)
+                await processing_msg.edit_text(f"❌ An error occurred while processing your {platform} request.\n\n{platform_specific_msg}")
 
     def get_platform_error_message(self, platform: str) -> str:
         """Get platform-specific error message and tips."""
@@ -1280,23 +1295,34 @@ Just send me a link to get started! 🎧"""
         """Extract Spotify info for display purposes only."""
         try:
             debug_write(f"Extracting Spotify info for display: {url}")
+
+            # Validate URL format first
+            if not url or 'spotify.com' not in url.lower():
+                debug_write(f"Invalid Spotify URL format: {url}")
+                raise Exception("Invalid Spotify URL format")
+
             track_id = self.extract_spotify_track_id(url)
             debug_write(f"Extracted track ID: {track_id}")
 
             if not track_id:
-                debug_write("No track ID found, returning default info")
-                return {
-                    'title': 'Spotify Track',
-                    'duration': 0,
-                    'uploader': 'Spotify',
-                    'platform': 'Spotify',
-                    'url': url
-                }
+                debug_write("No track ID found, checking URL format")
+                # Check if it's a valid Spotify URL but not a track
+                if '/playlist/' in url or '/album/' in url:
+                    raise Exception("Playlists and albums are not supported yet. Please use individual track links.")
+                elif '/artist/' in url:
+                    raise Exception("Artist pages are not supported. Please use individual track links.")
+                else:
+                    raise Exception("Could not extract track ID from Spotify URL. Please check the link format.")
 
             # Try to get metadata for display
             debug_write(f"Getting metadata for track ID: {track_id}")
-            metadata = await self.get_spotify_track_metadata(track_id)
-            debug_write(f"Metadata result: {metadata}")
+            try:
+                metadata = await self.get_spotify_track_metadata(track_id)
+                debug_write(f"Metadata result: {metadata}")
+            except Exception as metadata_error:
+                debug_write(f"Metadata extraction failed: {metadata_error}")
+                # Continue with default info instead of failing
+                metadata = None
 
             if metadata:
                 result = {
@@ -1319,13 +1345,8 @@ Just send me a link to get started! 🎧"""
                 }
         except Exception as e:
             debug_write(f"Error extracting Spotify info for display: {e}")
-            return {
-                'title': 'Spotify Track',
-                'duration': 0,
-                'uploader': 'Spotify',
-                'platform': 'Spotify',
-                'url': url
-            }
+            # Re-raise the exception so we can provide specific error messages
+            raise Exception(f"Spotify info extraction failed: {e}")
 
     async def show_audio_quality_options(self, update: Update, message, url: str, info: dict):
         """Show audio quality selection buttons."""
@@ -1577,13 +1598,14 @@ Just send me a link to get started! 🎧"""
 
             bitrate = quality_map.get(quality, '192')
 
-            # Prepare spotdl command
+            # Prepare spotdl command (updated for spotdl 4.x format)
             spotdl_cmd = [
                 "spotdl",
+                "download",  # Required operation for spotdl 4.x
+                url,  # URL comes after operation
                 "--bitrate", f"{bitrate}k",
                 "--format", "mp3",
-                "--output", str(output_dir),
-                url
+                "--output", str(output_dir)
             ]
 
             # Add FFmpeg path if available
@@ -1686,10 +1708,11 @@ Just send me a link to get started! 🎧"""
                             # Retry the original command without --ffmpeg flag
                             retry_cmd = [
                                 "spotdl",
+                                "download",  # Required operation for spotdl 4.x
+                                url,  # URL comes after operation
                                 "--bitrate", f"{bitrate}k",
                                 "--format", "mp3",
-                                "--output", str(output_dir),
-                                url
+                                "--output", str(output_dir)
                             ]
 
                             retry_result = await asyncio.get_event_loop().run_in_executor(
