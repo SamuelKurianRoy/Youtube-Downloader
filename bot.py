@@ -1575,6 +1575,8 @@ Just send me a link to get started! 🎧"""
 
     async def download_spotify_audio(self, query, url: str, quality: str, username: str, user_id: int):
         """Download Spotify audio using spotdl command-line tool."""
+        # Import subprocess at method level to ensure it's available throughout the method
+        import subprocess as sp  # Use alias to avoid any potential conflicts
         start_time = time.time()
 
         try:
@@ -1659,12 +1661,11 @@ Just send me a link to get started! 🎧"""
             logger.info(f"Starting spotdl download for user {username} ({user_id})")
 
             # Run spotdl command with timeout and error handling
-            import subprocess
             try:
                 result = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: subprocess.run(
+                        lambda: sp.run(
                             spotdl_cmd,
                             capture_output=True,
                             text=True,
@@ -1693,7 +1694,7 @@ Just send me a link to get started! 🎧"""
                         # Run spotdl --download-ffmpeg
                         ffmpeg_install_result = await asyncio.get_event_loop().run_in_executor(
                             None,
-                            lambda: subprocess.run(
+                            lambda: sp.run(
                                 ["spotdl", "--download-ffmpeg"],
                                 capture_output=True,
                                 text=True,
@@ -1717,7 +1718,7 @@ Just send me a link to get started! 🎧"""
 
                             retry_result = await asyncio.get_event_loop().run_in_executor(
                                 None,
-                                lambda: subprocess.run(
+                                lambda: sp.run(
                                     retry_cmd,
                                     capture_output=True,
                                     text=True,
@@ -1785,7 +1786,7 @@ Just send me a link to get started! 🎧"""
             total_time = time.time() - start_time
             logger.info(f"Spotify download completed for {username} ({user_id}) in {total_time:.1f}s")
 
-        except subprocess.TimeoutExpired:
+        except sp.TimeoutExpired:
             error_msg = "❌ Spotify download timed out (5 minutes). The track might be too long or there's a network issue."
             debug_write(f"Spotify download timeout for user {username} ({user_id})")
             user_logger.error(f"DOWNLOAD TIMEOUT | User: {username} ({user_id}) | Platform: Spotify | URL: {url}")
