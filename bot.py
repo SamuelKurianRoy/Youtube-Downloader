@@ -2085,11 +2085,12 @@ async def download_ffmpeg():
         if system == "linux" and (ffmpeg_dir / "ffmpeg.exe").exists():
             logger.info("Found Windows FFmpeg but running on Linux, downloading Linux version")
             try:
-                # Try multiple sources for Linux FFmpeg
+                # Try multiple sources for Linux FFmpeg (prioritize simple downloads)
                 ffmpeg_urls = [
-                    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
-                    "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
-                    "https://github.com/eugeneware/ffmpeg-static/releases/download/b4.4/ffmpeg-linux-x64"
+                    # Direct static binary (most reliable)
+                    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2023-12-09-12-49/ffmpeg-n6.1-2-g31f1a25352-linux64-gpl-6.1.tar.xz",
+                    # Alternative static binary
+                    "https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz",
                 ]
 
                 success = False
@@ -2105,15 +2106,50 @@ async def download_ffmpeg():
                         if ffmpeg_url.endswith('.tar.xz'):
                             # Handle compressed archives
                             import tempfile
-                            with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                            import tarfile
+
+                            with tempfile.NamedTemporaryFile(delete=False, suffix='.tar.xz') as tmp_file:
                                 for chunk in response.iter_content(chunk_size=8192):
                                     tmp_file.write(chunk)
                                 tmp_file.flush()
 
-                                # Extract the archive (simplified - just try to find ffmpeg binary)
                                 logger.info("Downloaded archive, extracting...")
-                                # For now, skip complex extraction and try direct download
-                                continue
+
+                                try:
+                                    # Extract the archive
+                                    with tarfile.open(tmp_file.name, 'r:xz') as tar:
+                                        # Find ffmpeg binary in the archive
+                                        ffmpeg_member = None
+                                        for member in tar.getmembers():
+                                            if member.name.endswith('/ffmpeg') or member.name == 'ffmpeg':
+                                                ffmpeg_member = member
+                                                break
+
+                                        if ffmpeg_member:
+                                            # Extract just the ffmpeg binary
+                                            tar.extract(ffmpeg_member, path=str(ffmpeg_dir))
+
+                                            # Move to the correct location if needed
+                                            extracted_path = ffmpeg_dir / ffmpeg_member.name
+                                            final_path = ffmpeg_dir / "ffmpeg"
+
+                                            if extracted_path != final_path:
+                                                extracted_path.rename(final_path)
+
+                                            logger.info(f"Successfully extracted FFmpeg to: {final_path}")
+                                        else:
+                                            logger.warning("FFmpeg binary not found in archive")
+                                            continue
+
+                                except Exception as extract_error:
+                                    logger.warning(f"Failed to extract archive: {extract_error}")
+                                    continue
+                                finally:
+                                    # Clean up temp file
+                                    try:
+                                        os.unlink(tmp_file.name)
+                                    except:
+                                        pass
                         else:
                             # Direct binary download
                             with open(linux_ffmpeg_path, 'wb') as f:
@@ -2145,6 +2181,27 @@ async def download_ffmpeg():
 
             except Exception as download_error:
                 logger.error(f"Failed to download Linux FFmpeg: {download_error}")
+
+        # Last resort: try to install FFmpeg using system package manager (for Streamlit Cloud)
+        if system == "linux":
+            logger.info("Attempting to install FFmpeg using system package manager...")
+            try:
+                # Try apt-get (Ubuntu/Debian systems like Streamlit Cloud)
+                install_result = subprocess.run(
+                    ["apt-get", "update", "&&", "apt-get", "install", "-y", "ffmpeg"],
+                    capture_output=True, text=True, timeout=120, shell=True
+                )
+                if install_result.returncode == 0:
+                    logger.info("Successfully installed FFmpeg via apt-get")
+                    # Test if it's now available
+                    test_result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
+                    if test_result.returncode == 0:
+                        logger.info("System FFmpeg is now working")
+                        return None  # System FFmpeg is available
+                else:
+                    logger.warning(f"Failed to install FFmpeg via apt-get: {install_result.stderr}")
+            except Exception as install_error:
+                logger.warning(f"Could not install FFmpeg via package manager: {install_error}")
 
         # If no working FFmpeg found, create directory and log the issue
         ffmpeg_dir.mkdir(exist_ok=True)
