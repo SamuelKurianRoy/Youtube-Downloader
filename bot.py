@@ -894,20 +894,31 @@ class TelegramYTDLBot:
     async def setup_ffmpeg(self):
         """Setup FFmpeg and add it to PATH."""
         try:
-            self.ffmpeg_path = await download_ffmpeg()
-            if self.ffmpeg_path:
+            ffmpeg_result = await download_ffmpeg()
+
+            if ffmpeg_result == "system":
+                # System FFmpeg is available
+                self.ffmpeg_path = "system"
+                logger.info("Using system FFmpeg installation")
+            elif ffmpeg_result:
+                # Local FFmpeg directory
+                self.ffmpeg_path = ffmpeg_result
                 # Add FFmpeg directory to PATH
                 current_path = os.environ.get("PATH", "")
                 if self.ffmpeg_path not in current_path:
                     os.environ["PATH"] = self.ffmpeg_path + os.pathsep + current_path
                 logger.info(f"FFmpeg set up at: {self.ffmpeg_path}")
             else:
+                # No FFmpeg available
+                self.ffmpeg_path = None
                 logger.warning("FFmpeg not available - some audio conversions may not work")
                 logger.info("Bot will try to download audio in native formats when possible")
+
             return self.ffmpeg_path
         except Exception as e:
             logger.error(f"Error setting up FFmpeg: {e}")
             logger.info("Continuing without FFmpeg - some features may be limited")
+            self.ffmpeg_path = None
             return None
 
     async def start(self):
@@ -1463,8 +1474,13 @@ Just send me a link to get started! 🎧"""
                 })
 
             # Add FFmpeg location if available
-            if self.ffmpeg_path:
+            if self.ffmpeg_path == "system":
+                # System FFmpeg is available, yt-dlp will find it automatically
+                logger.info("Using system FFmpeg for yt-dlp")
+            elif self.ffmpeg_path:
+                # Local FFmpeg directory
                 ydl_opts['ffmpeg_location'] = self.ffmpeg_path
+                logger.info(f"Using local FFmpeg for yt-dlp: {self.ffmpeg_path}")
             else:
                 # If no FFmpeg available, try to download audio-only formats that don't need conversion
                 logger.warning("No FFmpeg available, trying audio-only formats")
@@ -1571,8 +1587,11 @@ Just send me a link to get started! 🎧"""
             ]
 
             # Add FFmpeg path if available
-            if self.ffmpeg_path:
-                # Find the actual FFmpeg executable
+            if self.ffmpeg_path == "system":
+                # System FFmpeg is available, spotdl will find it automatically
+                logger.info("Using system FFmpeg for spotdl")
+            elif self.ffmpeg_path:
+                # Find the actual FFmpeg executable in local directory
                 import platform
                 system = platform.system().lower()
                 if system == "windows":
@@ -1582,7 +1601,7 @@ Just send me a link to get started! 🎧"""
 
                 if ffmpeg_exe.exists():
                     spotdl_cmd.extend(["--ffmpeg", str(ffmpeg_exe)])
-                    logger.info(f"Using FFmpeg for spotdl: {ffmpeg_exe}")
+                    logger.info(f"Using local FFmpeg for spotdl: {ffmpeg_exe}")
                 else:
                     logger.warning(f"FFmpeg not found at expected path: {ffmpeg_exe}")
             else:
@@ -2041,7 +2060,8 @@ async def download_ffmpeg():
             result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
             if result.returncode == 0:
                 logger.info("FFmpeg is already installed on the system")
-                return None  # No need to add to PATH
+                # Return a special marker to indicate system FFmpeg is available
+                return "system"  # Indicates system FFmpeg should be used
         except:
             logger.info("FFmpeg not found in system PATH, checking local directory")
 
@@ -2197,7 +2217,7 @@ async def download_ffmpeg():
                     test_result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
                     if test_result.returncode == 0:
                         logger.info("System FFmpeg is now working")
-                        return None  # System FFmpeg is available
+                        return "system"  # System FFmpeg is available
                 else:
                     logger.warning(f"Failed to install FFmpeg via apt-get: {install_result.stderr}")
             except Exception as install_error:
