@@ -1570,29 +1570,137 @@ Just send me a link to get started! 🎧"""
                 url
             ]
 
+            # Add FFmpeg path if available
+            if self.ffmpeg_path:
+                # Find the actual FFmpeg executable
+                import platform
+                system = platform.system().lower()
+                if system == "windows":
+                    ffmpeg_exe = Path(self.ffmpeg_path) / "ffmpeg.exe"
+                else:
+                    ffmpeg_exe = Path(self.ffmpeg_path) / "ffmpeg"
+
+                if ffmpeg_exe.exists():
+                    spotdl_cmd.extend(["--ffmpeg", str(ffmpeg_exe)])
+                    logger.info(f"Using FFmpeg for spotdl: {ffmpeg_exe}")
+                else:
+                    logger.warning(f"FFmpeg not found at expected path: {ffmpeg_exe}")
+            else:
+                logger.warning("No FFmpeg path available for spotdl")
+
+            # Check if spotdl is available
+            try:
+                spotdl_check = subprocess.run(["spotdl", "--version"], capture_output=True, text=True, timeout=10)
+                if spotdl_check.returncode != 0:
+                    raise FileNotFoundError("spotdl not found")
+                logger.info(f"Using spotdl version: {spotdl_check.stdout.strip()}")
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                raise Exception("spotdl is not installed. Please install it with: pip install spotdl")
+
+            # Pre-emptively try to ensure FFmpeg is available for spotdl
+            try:
+                # Check if spotdl can find FFmpeg
+                ffmpeg_check = subprocess.run(["spotdl", "--check-ffmpeg"], capture_output=True, text=True, timeout=10)
+                if ffmpeg_check.returncode != 0:
+                    logger.warning("spotdl cannot find FFmpeg, attempting to download it")
+                    # Try to download FFmpeg for spotdl
+                    ffmpeg_download = subprocess.run(["spotdl", "--download-ffmpeg"], capture_output=True, text=True, timeout=120)
+                    if ffmpeg_download.returncode == 0:
+                        logger.info("Successfully downloaded FFmpeg for spotdl")
+                    else:
+                        logger.warning(f"Failed to download FFmpeg for spotdl: {ffmpeg_download.stderr}")
+            except Exception as ffmpeg_setup_error:
+                logger.warning(f"Could not pre-setup FFmpeg for spotdl: {ffmpeg_setup_error}")
+
             await query.edit_message_text("🎵 Downloading with spotdl...")
 
             download_start = time.time()
             logger.info(f"Starting spotdl download for user {username} ({user_id})")
 
-            # Run spotdl command
+            # Run spotdl command with timeout and error handling
             import subprocess
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    spotdl_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,  # 5 minute timeout
-                    cwd=str(output_dir)
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: subprocess.run(
+                            spotdl_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=300,  # 5 minute timeout
+                            cwd=str(output_dir)
+                        )
+                    ),
+                    timeout=320  # Slightly longer timeout for asyncio
                 )
-            )
+            except asyncio.TimeoutError:
+                raise Exception("Spotify download timed out after 5 minutes")
 
             download_time = time.time() - download_start
 
             if result.returncode != 0:
                 error_output = result.stderr or result.stdout
-                raise Exception(f"spotdl failed: {error_output}")
+
+                # Check if the error is related to FFmpeg
+                if "FFmpegError" in error_output or "FFmpeg is not installed" in error_output:
+                    logger.warning("spotdl FFmpeg error detected, trying to fix...")
+
+                    # Try to download FFmpeg specifically for spotdl
+                    try:
+                        await query.edit_message_text("🔧 Setting up FFmpeg for Spotify downloads...")
+
+                        # Run spotdl --download-ffmpeg
+                        ffmpeg_install_result = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: subprocess.run(
+                                ["spotdl", "--download-ffmpeg"],
+                                capture_output=True,
+                                text=True,
+                                timeout=120  # 2 minute timeout for FFmpeg download
+                            )
+                        )
+
+                        if ffmpeg_install_result.returncode == 0:
+                            logger.info("FFmpeg installed successfully for spotdl")
+                            await query.edit_message_text("🎵 Retrying Spotify download...")
+
+                            # Retry the original command without --ffmpeg flag
+                            retry_cmd = [
+                                "spotdl",
+                                "--bitrate", f"{bitrate}k",
+                                "--format", "mp3",
+                                "--output", str(output_dir),
+                                url
+                            ]
+
+                            retry_result = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: subprocess.run(
+                                    retry_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=300,
+                                    cwd=str(output_dir)
+                                )
+                            )
+
+                            if retry_result.returncode == 0:
+                                result = retry_result  # Use the successful retry result
+                            else:
+                                raise Exception(f"spotdl retry failed: {retry_result.stderr or retry_result.stdout}")
+                        else:
+                            raise Exception(f"Failed to install FFmpeg for spotdl: {ffmpeg_install_result.stderr}")
+
+                    except Exception as ffmpeg_fix_error:
+                        logger.error(f"Could not fix FFmpeg for spotdl: {ffmpeg_fix_error}")
+                        # Try fallback to yt-dlp with YouTube search
+                        logger.info("Attempting fallback to YouTube search for Spotify track")
+                        return await self.download_spotify_fallback(query, url, quality, username, user_id)
+                else:
+                    # For other errors, try the fallback method
+                    logger.warning(f"spotdl failed with error: {error_output}")
+                    logger.info("Attempting fallback to YouTube search for Spotify track")
+                    return await self.download_spotify_fallback(query, url, quality, username, user_id)
 
             # Find the downloaded file
             downloaded_files = list(output_dir.glob("*.mp3"))
@@ -1663,6 +1771,34 @@ Just send me a link to get started! 🎧"""
                     shutil.rmtree(output_dir)
             except:
                 pass
+
+    async def download_spotify_fallback(self, query, url: str, quality: str, username: str, user_id: int):
+        """Fallback method to download Spotify tracks via YouTube search."""
+        try:
+            await query.edit_message_text("🔍 Searching for track on YouTube as fallback...")
+
+            # Extract Spotify track info
+            spotify_info = await self.extract_spotify_info_for_display(url)
+            if not spotify_info:
+                raise Exception("Could not extract Spotify track information")
+
+            # Search for the track on YouTube
+            search_query = f"{spotify_info['artist']} {spotify_info['title']}"
+            youtube_url = await self.search_youtube_for_spotify_track(search_query)
+
+            if not youtube_url:
+                raise Exception("Could not find track on YouTube")
+
+            await query.edit_message_text(f"🎵 Found on YouTube, downloading: {search_query}")
+
+            # Use the regular download method with the YouTube URL
+            return await self.download_audio(query, youtube_url, quality, username, user_id)
+
+        except Exception as e:
+            debug_write(f"Error in Spotify fallback download: {e}")
+            await query.edit_message_text(f"❌ Spotify fallback download failed: {e}")
+            user_logger.error(f"FALLBACK DOWNLOAD FAILED | User: {username} ({user_id}) | Platform: Spotify | URL: {url} | Error: {e}")
+            raise
 
     async def extract_spotify_metadata(self, url: str):
         """Extract metadata from Spotify URL using web scraping approach."""
