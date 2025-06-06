@@ -1224,10 +1224,17 @@ Just send me a link to get started! 🎧"""
             if env.COOKIE_FILE.exists():
                 ydl_opts['cookiefile'] = str(env.COOKIE_FILE)
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ydl.extract_info(url, download=False)
-                )
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Add timeout for info extraction
+                    info = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, lambda: ydl.extract_info(url, download=False)
+                        ),
+                        timeout=60  # 1 minute timeout for info extraction
+                    )
+            except asyncio.TimeoutError:
+                raise Exception("Info extraction timed out after 1 minute")
 
             # Extract platform-specific information
             title = info.get('title', 'Unknown Title')
@@ -1459,12 +1466,19 @@ Just send me a link to get started! 🎧"""
             download_start = time.time()
             logger.info(f"Starting audio download for user {username} ({user_id})")
 
-            # Download the audio
+            # Download the audio with timeout handling
             import yt_dlp
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ydl.extract_info(url, download=True)
-                )
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Use asyncio.wait_for to add timeout to the download
+                    info = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, lambda: ydl.extract_info(url, download=True)
+                        ),
+                        timeout=300  # 5 minute timeout for downloads
+                    )
+            except asyncio.TimeoutError:
+                raise Exception("Download timed out after 5 minutes")
 
             download_time = time.time() - download_start
 
@@ -1775,10 +1789,18 @@ Just send me a link to get started! 🎧"""
                 'default_search': 'ytsearch1:',  # Search for 1 result
             }
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                search_results = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ydl.extract_info(search_query, download=False)
-                )
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Add timeout for YouTube search
+                    search_results = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, lambda: ydl.extract_info(search_query, download=False)
+                        ),
+                        timeout=30  # 30 second timeout for search
+                    )
+            except asyncio.TimeoutError:
+                debug_write("YouTube search timed out")
+                return None
 
             # Get the first result
             if search_results and 'entries' in search_results and search_results['entries']:

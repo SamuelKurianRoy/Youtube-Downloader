@@ -126,14 +126,14 @@ def start_bot_in_cloud():
             f.write(f"{datetime.now()} - INFO - Attempting to start bot via Streamlit Cloud\n")
         debug_write("Wrote to bot log about start attempt")
         
-        # Try to run the bot directly first
+        # Always try to run the bot directly first (more reliable)
         success = run_bot_directly()
         if success:
             debug_write("Bot started directly")
             return True
-            
-        # If direct method fails, try subprocess method
-        debug_write("Direct method failed, trying subprocess method")
+
+        # If direct method fails, try subprocess method as fallback
+        debug_write("Direct method failed, trying subprocess method as fallback")
         
         # In Streamlit Cloud, we need to actually start the process
         # We'll use a thread to avoid blocking the Streamlit app
@@ -142,27 +142,50 @@ def start_bot_in_cloud():
                 debug_write("Starting bot process in thread")
                 with open(bot_log_path, 'a') as f:
                     f.write(f"{datetime.now()} - INFO - Starting bot process in thread\n")
-                    
+
                 # Run the bot script with subprocess
                 debug_write(f"Running: {sys.executable} {bot_script_path}")
-                
-                # Use subprocess.Popen for better control
+
+                # Use subprocess.Popen for better control with improved pipe handling
                 process = subprocess.Popen(
                     [sys.executable, str(bot_script_path)],
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
+                    stderr=subprocess.PIPE,  # Separate stderr to avoid mixing
                     text=True,
+                    bufsize=1,  # Line buffered
                     env=os.environ.copy()  # Pass current environment
                 )
-                
-                # Log the process output
-                for line in process.stdout:
-                    debug_write(f"BOT OUTPUT: {line.strip()}")
-                
-                # Wait for process to complete
-                return_code = process.wait()
-                debug_write(f"Bot process exited with code: {return_code}")
-                
+
+                # Store process reference for cleanup
+                import threading
+                current_thread = threading.current_thread()
+                current_thread.process = process
+
+                # Read output with timeout and error handling
+                try:
+                    # Use communicate with timeout to avoid hanging
+                    stdout, stderr = process.communicate(timeout=30)  # 30 second timeout for startup
+
+                    if stdout:
+                        debug_write(f"BOT STDOUT: {stdout.strip()}")
+                    if stderr:
+                        debug_write(f"BOT STDERR: {stderr.strip()}")
+
+                    debug_write(f"Bot process exited with code: {process.returncode}")
+
+                except subprocess.TimeoutExpired:
+                    debug_write("Bot process startup timeout - process is running in background")
+                    # Process is running, don't wait for it to complete
+
+                except Exception as pipe_error:
+                    # Handle specific pipe errors
+                    error_str = str(pipe_error).lower()
+                    if "broken pipe" in error_str or "errno 32" in error_str:
+                        debug_write("Broken pipe error detected - bot is running normally")
+                    else:
+                        debug_write(f"Pipe communication error: {pipe_error}")
+                    # These errors are expected when the bot is running normally
+
             except Exception as e:
                 error_msg = f"Failed to run bot: {e}"
                 debug_write(f"ERROR: {error_msg}")

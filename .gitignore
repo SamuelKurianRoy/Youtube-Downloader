@@ -7,7 +7,6 @@ storage/*
 !storage/.gitkeep
 
 # FFmpeg directory - but keep the directory itself
-ffmpeg/*
 !ffmpeg/.gitkeep
 
 # Debug log
