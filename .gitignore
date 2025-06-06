@@ -26,3 +26,42 @@ ENV/
 
 # Streamlit secrets
 .streamlit/secrets.toml
+
+# Test files (development only)
+test_*.py
+*_test.py
+tests/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Bot flag file (runtime only)
+bot_running.flag
+
+# Downloaded content (temporary)
+downloads/
+temp_downloads/
+
+# User preferences and runtime data
+user_preferences.json
+queue_data.json
+
+# Backup files
+*.bak
+*.backup
+*.old
