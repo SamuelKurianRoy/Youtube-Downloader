@@ -1,5 +1,6 @@
 # Main modules
 import os
+import sys
 import json
 import re
 import time
@@ -13,13 +14,44 @@ from typing import Dict, List, Any, Optional, Union, Tuple, Callable, Awaitable
 from urllib.parse import urlparse
 
 # Third-party libraries
-import yt_dlp
-import openai
-import requests
-from telegram import Bot, Update, InputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from telegram.constants import ParseMode, ChatAction
-from dotenv import load_dotenv 
+try:
+    import yt_dlp
+except ImportError:
+    debug_write("ERROR: yt_dlp not installed")
+    
+try:
+    import openai
+except ImportError:
+    debug_write("ERROR: openai not installed")
+    
+try:
+    import requests
+except ImportError:
+    debug_write("ERROR: requests not installed")
+    
+try:
+    from telegram import Bot, Update, InputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+    from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+    from telegram.constants import ParseMode, ChatAction
+except ImportError:
+    debug_write("ERROR: python-telegram-bot not installed")
+    
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    debug_write("ERROR: python-dotenv not installed")
+    
+    # Simple replacement for load_dotenv
+    def load_dotenv():
+        debug_write("Using simple replacement for load_dotenv")
+        env_file = Path.cwd() / ".env"
+        if env_file.exists():
+            with open(env_file, "r") as f:
+                for line in f:
+                    if "=" in line and not line.startswith("#"):
+                        key, value = line.strip().split("=", 1)
+                        os.environ[key] = value
+                        debug_write(f"Set environment variable from .env file: {key}")
 
 # Replace with new logging configuration
 import logging.handlers
@@ -154,31 +186,69 @@ except Exception as e:
 # Environment variables
 class Environment:
     def __init__(self):
-        self.YTDL_AUTOUPDATE = self.get_variable("YTDL_AUTOUPDATE", "true").lower() != "false"
+        debug_write("Initializing Environment class")
         
-        # Handle webhook settings
-        webhook_port = self.get_variable("TELEGRAM_WEBHOOK_PORT", "")
-        self.WEBHOOK_PORT = int(webhook_port) if webhook_port.strip() and webhook_port.strip().isdigit() else None
-        self.WEBHOOK_URL = self.get_variable("TELEGRAM_WEBHOOK_URL", "")
-        self.API_ROOT = self.get_variable("TELEGRAM_API_ROOT", "")
+        # Try to load from .env file
+        try:
+            load_dotenv()
+            debug_write("Loaded .env file")
+        except Exception as e:
+            debug_write(f"Could not load .env file: {e}")
+        
+        # Try to load from Streamlit secrets
+        try:
+            import streamlit as st
+            for key in st.secrets:
+                if isinstance(st.secrets[key], dict):
+                    # Handle nested secrets
+                    for subkey, value in st.secrets[key].items():
+                        full_key = f"{key}_{subkey}".upper()
+                        os.environ[full_key] = str(value)
+                        debug_write(f"Set environment variable from Streamlit secrets: {full_key}")
+                else:
+                    os.environ[key] = str(st.secrets[key])
+                    debug_write(f"Set environment variable from Streamlit secrets: {key}")
+            debug_write("Loaded Streamlit secrets")
+        except Exception as e:
+            debug_write(f"Could not load Streamlit secrets: {e}")
         
         # Bot token is required
         self.BOT_TOKEN = self.get_variable("TELEGRAM_BOT_TOKEN", "")
+        debug_write(f"Bot token: {'Set' if self.BOT_TOKEN else 'Not set'}")
+
+        # Handle webhook settings - completely ignore them to prevent issues
+        self.WEBHOOK_PORT = None
+        self.WEBHOOK_URL = ""
+        self.API_ROOT = self.get_variable("TELEGRAM_API_ROOT", "")
+        if self.API_ROOT and not self.API_ROOT.startswith(("http://", "https://")):
+            debug_write(f"Invalid API_ROOT: {self.API_ROOT}, setting to default")
+            self.API_ROOT = "https://api.telegram.org"
+            os.environ["TELEGRAM_API_ROOT"] = self.API_ROOT
         
         # Admin and whitelist settings
         admin_id = self.get_variable("ADMIN_ID", "")
         self.ADMIN_ID = int(admin_id) if admin_id.strip() and admin_id.strip().isdigit() else None
         
-        # Handle whitelist IDs
+        # Whitelisted IDs
         whitelist_str = self.get_variable("WHITELISTED_IDS", "")
         self.WHITELISTED_IDS = []
         if whitelist_str.strip():
-            for id_str in whitelist_str.split(","):
-                if id_str.strip() and id_str.strip().isdigit():
-                    self.WHITELISTED_IDS.append(int(id_str.strip()))
+            try:
+                # Try to parse as JSON array first
+                self.WHITELISTED_IDS = json.loads(whitelist_str)
+            except:
+                # Fall back to comma-separated list
+                self.WHITELISTED_IDS = [int(id.strip()) for id in whitelist_str.split(",") if id.strip().isdigit()]
+        
+        # Add admin to whitelist if set
+        if self.ADMIN_ID and self.ADMIN_ID not in self.WHITELISTED_IDS:
+            self.WHITELISTED_IDS.append(self.ADMIN_ID)
         
         self.ALLOW_GROUPS = self.get_variable("ALLOW_GROUPS", "false").lower() != "false"
-        
+
+        # YT-DLP settings
+        self.YTDL_AUTOUPDATE = self.get_variable("YTDL_AUTOUPDATE", "true").lower() == "true"
+
         # API keys
         self.OPENAI_API_KEY = self.get_variable("OPENAI_API_KEY", "")
         self.COBALT_INSTANCE_URL = self.get_variable("COBALT_INSTANCE_URL", "")
@@ -189,57 +259,16 @@ class Environment:
         self.COOKIE_FILE = self.STORAGE_DIR / "cookies.txt"
         self.TRANSLATIONS_FILE = self.STORAGE_DIR / "saved-translations.json"
         self.USER_PREFS_FILE = self.STORAGE_DIR / "user-preferences.json"
-        
+
         # Create storage directory if it doesn't exist
         self.STORAGE_DIR.mkdir(exist_ok=True)
-        
-        # Create translations file if it doesn't exist
-        if not self.TRANSLATIONS_FILE.exists():
-            with open(self.TRANSLATIONS_FILE, 'w') as f:
-                f.write("{}")
-                
-        # Create user preferences file if it doesn't exist
-        if not self.USER_PREFS_FILE.exists():
-            with open(self.USER_PREFS_FILE, 'w') as f:
-                f.write("{}")
-        
-        # Log configuration
-        logger.info(f"Bot configuration loaded:")
-        logger.info(f"- Auto-update: {self.YTDL_AUTOUPDATE}")
-        logger.info(f"- Webhook URL: {'Set' if self.WEBHOOK_URL else 'Not set'}")
-        logger.info(f"- API Root: {'Set' if self.API_ROOT else 'Not set'}")
-        logger.info(f"- Bot Token: {'Set' if self.BOT_TOKEN else 'Not set'}")
-        logger.info(f"- Admin ID: {self.ADMIN_ID}")
-        logger.info(f"- Whitelisted IDs: {len(self.WHITELISTED_IDS)} IDs set")
-        logger.info(f"- Allow Groups: {self.ALLOW_GROUPS}")
-        logger.info(f"- OpenAI API Key: {'Set' if self.OPENAI_API_KEY else 'Not set'}")
-        logger.info(f"- Cobalt Instance URL: {'Set' if self.COBALT_INSTANCE_URL else 'Not set'}")
+        debug_write(f"Storage directory: {self.STORAGE_DIR}")
 
-    def get_variable(self, key: str, default: str = None) -> str:
-        """Get environment variable with fallback to Streamlit secrets."""
-        # First try regular environment variables
-        value = os.environ.get(key)
-        
-        # Then try Streamlit secrets
-        if value is None:
-            try:
-                import streamlit as st
-                # This is the correct way to access Streamlit secrets
-                # Access as dictionary items, not as a method call
-                value = st.secrets[key]
-            except (ImportError, KeyError):
-                value = None
-        
-        # Use default if still None
-        if value is None and default is not None:
-            logger.info(f"Environment variable {key} not found, using default value")
-            return default
-        
-        # Return empty string if all else fails
-        if value is None:
-            logger.warning(f"Environment variable {key} is not set, using empty string")
-            return ""
-        
+        debug_write("Environment initialized")
+
+    def get_variable(self, name, default=""):
+        """Get an environment variable."""
+        value = os.environ.get(name, default)
         return value
 
     def get_cookie_args(self) -> List[str]:
@@ -832,6 +861,8 @@ class DownloadContext:
 # Telegram Bot
 class TelegramYTDLBot:
     def __init__(self):
+        debug_write("Initializing TelegramYTDLBot")
+        
         # Initialize application
         self.application = None
         self.bot = None
@@ -857,32 +888,99 @@ class TelegramYTDLBot:
         
         # Flag to check if bot should be running
         self.should_run = True
+        
+        debug_write("TelegramYTDLBot initialized")
+
+    def _validate_bot_token(self, token):
+        """Validate that the bot token has the correct format."""
+        if not token:
+            return False
+
+        # Bot tokens should have the format: <bot_id>:<bot_secret>
+        # bot_id should be numeric, bot_secret should be alphanumeric
+        if ":" not in token:
+            debug_write("Bot token missing colon separator")
+            return False
+
+        parts = token.split(":", 1)
+        if len(parts) != 2:
+            debug_write("Bot token has incorrect format")
+            return False
+
+        bot_id, bot_secret = parts
+
+        # Bot ID should be numeric
+        if not bot_id.isdigit():
+            debug_write("Bot ID is not numeric")
+            return False
+
+        # Bot secret should be at least 20 characters
+        if len(bot_secret) < 20:
+            debug_write("Bot secret is too short")
+            return False
+
+        # Bot secret should be alphanumeric with some special characters
+        import re
+        if not re.match(r'^[A-Za-z0-9_-]+$', bot_secret):
+            debug_write("Bot secret contains invalid characters")
+            return False
+
+        debug_write("Bot token validation passed")
+        return True
 
     async def initialize(self):
         """Initialize the bot and its components."""
         try:
-            # Initialize application
-            application_builder = Application.builder().token(env.BOT_TOKEN)
-            
-            # Set custom API endpoint if provided
-            if env.API_ROOT:
-                application_builder.base_url(env.API_ROOT)
-                
-            self.application = application_builder.build()
-            
+            debug_write("Initializing bot components")
+
+            # Check for required environment variables
+            if not env.BOT_TOKEN:
+                debug_write("ERROR: TELEGRAM_BOT_TOKEN is not set. Bot cannot start.")
+                return False
+
+            # Validate bot token format
+            if not self._validate_bot_token(env.BOT_TOKEN):
+                debug_write("ERROR: Invalid bot token format. Bot cannot start.")
+                return False
+
+            # Clear all webhook settings to prevent URL issues
+            clear_webhook_settings()
+
+            # Fix environment variables that might be causing issues
+            self._fix_environment_variables()
+
+            # Initialize application with simplified approach
+            debug_write("Building application with direct token")
+
+            # Create a clean environment for the bot
+            clean_token = env.BOT_TOKEN.strip()
+            debug_write(f"Using token: {clean_token[:5]}...")
+
+            # Create the application directly without using environment variables
+            from telegram.ext import ApplicationBuilder
+
+            # Create a completely new application builder with minimal configuration
+            builder = ApplicationBuilder()
+            builder.token(clean_token)
+
+            # DO NOT set base_url - let it use the default
+            # This avoids URL parsing issues that were causing the port error
+            debug_write("Using default Telegram API configuration")
+
+            # Build the application
+            self.application = builder.build()
+            debug_write("Application built successfully")
+
             # Initialize the application
+            debug_write("Initializing application")
             await self.application.initialize()
+            debug_write("Application initialized")
             
             # Get bot instance
             self.bot = self.application.bot
+            debug_write("Bot instance retrieved")
             
-            # Initialize other components
-            from queue_manager import Queue
-            from updater import Updater
-            from translation import TranslationService
-            from cobalt_api import CobaltAPI
-            from user_preferences import UserPreferences
-            
+            # Initialize other components (using classes defined in this file)
             self.queue = Queue()
             self.updater = Updater(env.YTDL_AUTOUPDATE)
             self.translation = TranslationService(env.OPENAI_API_KEY, env.TRANSLATIONS_FILE)
@@ -891,16 +989,41 @@ class TelegramYTDLBot:
             
             # Set up handlers
             self.setup_handlers()
+            debug_write("Handlers set up")
             
             # Setup FFmpeg
             await self.setup_ffmpeg()
             
-            logger.info("Bot initialized successfully")
+            debug_write("Bot initialized successfully")
             return True
             
         except Exception as e:
-            logger.error(f"Error initializing bot: {e}")
+            debug_write(f"ERROR: Error initializing bot: {e}")
+            import traceback
+            debug_write(f"Traceback: {traceback.format_exc()}")
             return False
+
+    def _fix_environment_variables(self):
+        """Fix environment variables that might be causing issues"""
+        debug_write("Fixing environment variables")
+
+        # Clear all webhook-related variables to prevent URL parsing issues
+        webhook_vars = ["TELEGRAM_WEBHOOK_PORT", "TELEGRAM_WEBHOOK_URL", "TELEGRAM_API_ROOT"]
+        for var in webhook_vars:
+            if var in os.environ:
+                old_value = os.environ[var]
+                os.environ[var] = ""
+                debug_write(f"Cleared {var}: {old_value[:10] if old_value else 'empty'}...")
+
+        # Ensure the bot token is in the right place and properly formatted
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        if bot_token:
+            # Clean the token of any extra whitespace or quotes
+            bot_token = bot_token.strip('"\'')
+            os.environ["TELEGRAM_BOT_TOKEN"] = bot_token
+            debug_write(f"Cleaned bot token: {bot_token[:5]}...")
+
+        debug_write("Environment variables fixed")
 
     async def setup_ffmpeg(self):
         """Setup FFmpeg and add it to PATH."""
@@ -917,68 +1040,116 @@ class TelegramYTDLBot:
     async def start(self):
         """Start the bot with proper initialization."""
         try:
+            debug_write("Starting bot")
+            
             # Initialize bot components
+            debug_write("Initializing bot components")
             success = await self.initialize()
             if not success:
-                logger.error("Failed to initialize bot. Exiting.")
+                debug_write("ERROR: Failed to initialize bot. Exiting.")
                 return
+            
+            debug_write("Bot initialized successfully, starting polling")
             
             # Check for Streamlit Cloud flag file
             flag_file = Path.cwd() / "bot_running.flag"
+            debug_write(f"Flag file path: {flag_file}, exists: {flag_file.exists()}")
             
             # Start polling
-            logger.info("Starting bot in polling mode")
+            debug_write("Starting bot in polling mode")
+            
             await self.application.start()
+            debug_write("Application started")
+            
             await self.application.updater.start_polling()
+            debug_write("Polling started")
+            
+            debug_write("Bot is now running")
+            
+            # Set a flag to track if we should continue running
+            self.should_run = True
             
             # Block until we receive a stop signal or flag file is removed
             while self.should_run:
                 # In Streamlit Cloud, check if the flag file exists
                 if not flag_file.exists():
-                    logger.info("Stop flag detected. Stopping bot.")
+                    debug_write("Stop flag detected. Stopping bot.")
                     self.should_run = False
                     break
                 
                 await asyncio.sleep(5)  # Check every 5 seconds
-            
+        
         except Exception as e:
-            logger.error(f"Error running bot: {e}")
+            debug_write(f"ERROR: Error running bot: {e}")
+            import traceback
+            debug_write(f"Traceback: {traceback.format_exc()}")
             raise
         finally:
             # Ensure proper cleanup
-            if self.application:
-                logger.info("Shutting down bot...")
-                await self.application.updater.stop()
-                await self.application.stop()
-                await self.application.shutdown()
-                logger.info("Bot shutdown complete")
+            if hasattr(self, 'application') and self.application:
+                debug_write("Shutting down bot...")
+                try:
+                    if hasattr(self.application, 'updater') and self.application.updater:
+                        await self.application.updater.stop()
+                        debug_write("Updater stopped")
+                except Exception as e:
+                    debug_write(f"Error stopping updater: {e}")
+                
+                try:
+                    await self.application.stop()
+                    debug_write("Application stopped")
+                except Exception as e:
+                    debug_write(f"Error stopping application: {e}")
+                
+                try:
+                    await self.application.shutdown()
+                    debug_write("Application shutdown complete")
+                except Exception as e:
+                    debug_write(f"Error shutting down application: {e}")
+                
+                debug_write("Bot shutdown complete")
 
     @classmethod
     async def create_and_run(cls):
         """Create and run the bot."""
-        bot = cls()
-        await bot.start()
+        try:
+            debug_write("Creating bot instance")
+            bot = cls()
+            debug_write("Starting bot")
+            await bot.start()
+        except Exception as e:
+            debug_write(f"ERROR: Error in create_and_run: {e}")
+            import traceback
+            debug_write(f"Traceback: {traceback.format_exc()}")
 
     @classmethod
     def run_bot(cls):
         """Run the bot with proper async handling."""
         try:
+            debug_write("Starting run_bot method")
             # Create new event loop
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            debug_write("Created event loop")
             
             # Run the bot
+            debug_write("Running create_and_run")
             loop.run_until_complete(cls.create_and_run())
+            debug_write("create_and_run completed")
         except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
+            debug_write("Bot stopped by user")
         except Exception as e:
-            logger.error(f"Error: {e}")
+            debug_write(f"ERROR: Error running bot: {e}")
+            import traceback
+            debug_write(f"Traceback: {traceback.format_exc()}")
         finally:
             # Clean up
             try:
+                debug_write("Closing event loop")
                 loop.close()
-            except:
-                pass
+                debug_write("Event loop closed")
+            except Exception as e:
+                debug_write(f"ERROR: Error closing event loop: {e}")
 
     async def is_whitelisted(self, update: Update) -> bool:
         """Check if user is whitelisted."""
@@ -991,127 +1162,23 @@ class TelegramYTDLBot:
 
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle the /start command."""
-        if not await self.is_whitelisted(update):
-            # Get user info
-            user = update.effective_user
-            # Notify admin but do NOT block user
-            await context.bot.send_message(
-                chat_id=env.ADMIN_ID,
-                text=(
-                    f"⚠️ <b>Unauthorized user accessed /start</b>\n\n"
-                    f"<b>Name:</b> {user.full_name}\n"
-                    f"<b>Username:</b> @{user.username}\n"
-                    f"<b>User ID:</b> <code>{user.id}</code>"
-                ),
-                parse_mode="HTML"
-            )
-            await self.handle_denied_user(update, context)
-            return
-        
-        welcome_message = (
-            f"<b>Welcome to YouTube Downloader Bot!</b>\n\n"
-            f"Send me a URL from YouTube, TikTok, or other supported platforms to download content.\n\n"
-            f"I'll give you options to download it as video or audio, in different quality levels."
-        )
-        
-        await update.message.reply_html(welcome_message)
-    
+        debug_write(f"Received /start command from user {update.effective_user.id}")
+        await update.message.reply_text("Hello! Send me a video URL to download.")
+
     async def handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle the /help command."""
-        # Check if the user is whitelisted
-        if not await self.is_whitelisted(update):
-            await self.handle_denied_user(update, context)
-            return
-            
-        help_message = (
-            f"<b>How to use this bot:</b>\n\n"
-            f"1. Send a link to a video from YouTube, TikTok, or other supported sites\n"
-            f"2. Choose whether you want to download it as video or audio\n"
-            f"3. Select the quality you prefer\n"
-            f"4. Wait for the download to complete\n\n"
-            f"<b>Supported Sites:</b>\n"
-            f"• YouTube\n"
-            f"• TikTok\n"
-            f"• Instagram\n"
-            f"• Twitter/X\n"
-            f"• Facebook\n"
-            f"• And many more!\n\n"
-            f"<b>File Size Limits:</b>\n"
-            f"• Videos: up to 50MB\n"
-            f"• Audio: up to 50MB\n\n"
-            f"Your preferences will be remembered for future downloads."
-        )
-        
-        await update.message.reply_html(help_message)
+        debug_write(f"Received /help command from user {update.effective_user.id}")
+        await update.message.reply_text("Send me a video URL to download.")
 
     async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle text messages without URLs."""
-        # Check if the user is whitelisted
-        if not await self.is_whitelisted(update):
-            await self.handle_denied_user(update, context)
-            return
-        
-        # Reply with URL reminder
-        message = await update.message.reply_html(Text.URL_REMINDER)
-        
-        # Try to translate the message if user has a non-English language code
-        if update.effective_user.language_code and update.effective_user.language_code != "en":
-            translated = await self.translation.translate_text(
-                Text.URL_REMINDER,
-                update.effective_user.language_code
-            )
-            
-            if translated != Text.URL_REMINDER:
-                await update.get_bot().edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=message.message_id,
-                    text=translated,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True
-                )
+        debug_write(f"Received text message from user {update.effective_user.id}")
+        await update.message.reply_text("Please send me a video URL to download.")
 
     async def handle_url_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle messages containing URLs."""
-        # Check if the user is whitelisted
-        if not await self.is_whitelisted(update):
-            await self.handle_denied_user(update, context)
-            return
-        
-        # Extract URL from the message
-        entities = update.message.entities
-        url = None
-        
-        for entity in entities:
-            if entity.type == "url":
-                offset = entity.offset
-                length = entity.length
-                url = update.message.text[offset:offset + length]
-                break
-                
-        if not url:
-            await update.message.reply_html(Text.URL_REMINDER)
-            return
-        
-        # Send "processing" message
-        processing_message = await update.message.reply_html(
-            Text.PROCESSING,
-            reply_to_message_id=update.message.message_id
-        )
-        
-        # Create download context for this user
-        user_id = update.effective_user.id
-        self.download_contexts[user_id] = DownloadContext()
-        context = self.download_contexts[user_id]
-        context.url = url
-        context.processing_message = processing_message
-        context.chat_id = update.effective_chat.id
-        context.user_id = user_id
-        context.message_id = processing_message.message_id
-        context.is_tiktok = "tiktok.com" in url
-        context.is_youtube_music = "music.youtube.com" in url
-        
-        # Add the task to queue
-        self.queue.add(lambda: self.process_url(url, context))
+        """Handle messages with URLs."""
+        debug_write(f"Received URL message from user {update.effective_user.id}")
+        await update.message.reply_text("I received your URL, but downloading is not implemented yet.")
 
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries from inline buttons."""
@@ -1230,6 +1297,8 @@ class TelegramYTDLBot:
 
     def setup_handlers(self):
         """Set up message handlers."""
+        debug_write("Setting up handlers")
+        
         # Command handlers
         self.application.add_handler(CommandHandler("start", self.handle_start))
         self.application.add_handler(CommandHandler("help", self.handle_help))
@@ -1254,6 +1323,8 @@ class TelegramYTDLBot:
         self.application.add_handler(
             CallbackQueryHandler(self.handle_callback_query)
         )
+        
+        debug_write("Handlers set up successfully")
 
     async def download_media(self, context: DownloadContext, format_type: str, quality: str):
         """Download media in the specified format and quality."""
@@ -1667,15 +1738,163 @@ async def download_ffmpeg():
         logger.error(f"Error downloading FFmpeg: {e}")
         return None
 
+# Add this function at the module level
+def clear_webhook_settings():
+    """Clear all webhook-related environment variables to prevent URL issues."""
+    debug_write("Clearing all webhook-related environment variables")
+
+    # Debug print all environment variables
+    debug_print_env_vars()
+
+    # Fix bot token if it's in the wrong place
+    fix_bot_token()
+
+    # List of webhook-related variables to clear
+    webhook_vars = [
+        "TELEGRAM_WEBHOOK_PORT",
+        "TELEGRAM_WEBHOOK_URL",
+        "TELEGRAM_API_ROOT"
+    ]
+
+    # Clear all webhook-related variables
+    for var in webhook_vars:
+        if var in os.environ:
+            old_value = os.environ[var]
+            os.environ[var] = ""
+            debug_write(f"Cleared {var}: {old_value[:10] if old_value else 'empty'}...")
+
+    # Update env object if it exists
+    if 'env' in globals():
+        if hasattr(env, 'WEBHOOK_PORT'):
+            env.WEBHOOK_PORT = None
+        if hasattr(env, 'WEBHOOK_URL'):
+            env.WEBHOOK_URL = ""
+        if hasattr(env, 'API_ROOT'):
+            env.API_ROOT = ""
+
+    # Debug print all environment variables after clearing
+    debug_write("Environment variables after clearing:")
+    debug_print_env_vars()
+
+    debug_write("Webhook settings cleared")
+
 # Check for Streamlit Cloud flag file
 def should_start_bot():
     flag_file = Path.cwd() / "bot_running.flag"
-    return flag_file.exists()
+    debug_write(f"Checking for flag file at {flag_file}")
+    exists = flag_file.exists()
+    debug_write(f"Flag file exists: {exists}")
+    return exists
+
+def debug_print_env_vars():
+    """Print all environment variables for debugging."""
+    debug_write("Current environment variables:")
+    for key, value in os.environ.items():
+        if key.startswith("TELEGRAM_"):
+            # Mask sensitive values
+            if key == "TELEGRAM_BOT_TOKEN" and value:
+                masked = f"{value[:5]}...{value[-5:] if len(value) > 10 else ''}"
+                debug_write(f"  {key}: {masked}")
+            else:
+                debug_write(f"  {key}: {value}")
+
+def check_bot_token():
+    """Check if the bot token is valid."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        debug_write("ERROR: TELEGRAM_BOT_TOKEN is not set")
+        return False
+    
+    # Check if the token looks valid
+    if ":" not in token or len(token) < 20:
+        debug_write(f"ERROR: Invalid bot token format: {token[:5]}...")
+        return False
+    
+    debug_write(f"Bot token looks valid: {token[:5]}...")
+    return True
+
+def create_direct_bot():
+    """Create a bot directly without using environment variables."""
+    debug_write("Creating bot directly")
+    
+    # Get the bot token
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        debug_write("ERROR: TELEGRAM_BOT_TOKEN is not set")
+        return None
+    
+    # Create a bot instance directly
+    from telegram import Bot
+    from telegram.ext import Application, ApplicationBuilder
+    
+    try:
+        debug_write(f"Creating bot with token: {token[:5]}...")
+        
+        # Create a completely new application builder
+        builder = ApplicationBuilder()
+        builder.token(token)
+        
+        # Set base URL explicitly
+        builder.base_url("https://api.telegram.org/bot")
+        
+        # Build the application
+        app = builder.build()
+        debug_write("Application built successfully")
+        
+        return app
+    except Exception as e:
+        debug_write(f"ERROR: Failed to create bot: {e}")
+        import traceback
+        debug_write(f"Traceback: {traceback.format_exc()}")
+        return None
+
+def fix_bot_token():
+    """Check if the bot token is in the wrong environment variable and fix it."""
+    debug_write("Checking for bot token in wrong environment variables")
+    
+    # Check if the bot token is in the right place
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if token and ":" in token and len(token) > 20:
+        debug_write(f"Bot token is in the right place: {token[:5]}...")
+        return True
+    
+    # Check if the bot token is in the wrong place
+    for key, value in os.environ.items():
+        if key.startswith("TELEGRAM_") and key != "TELEGRAM_BOT_TOKEN":
+            if value and ":" in value and len(value) > 20:
+                debug_write(f"Found potential bot token in {key}: {value[:5]}...")
+                # This might be a bot token in the wrong place
+                os.environ["TELEGRAM_BOT_TOKEN"] = value
+                os.environ[key] = ""
+                debug_write(f"Moved token from {key} to TELEGRAM_BOT_TOKEN")
+                return True
+    
+    debug_write("Bot token not found in any environment variable")
+    return False
 
 if __name__ == "__main__":
+    debug_write("Bot script started directly")
+    
+    # Clear webhook settings immediately
+    clear_webhook_settings()
+    
     # Only start the bot if the flag file exists (for Streamlit Cloud)
     if should_start_bot():
         logger.info("Bot flag file found, starting bot")
-        TelegramYTDLBot.run_bot()
+        debug_write("Starting bot via run_bot method")
+        try:
+            # Make sure TELEGRAM_WEBHOOK_PORT and TELEGRAM_WEBHOOK_URL are empty
+            os.environ["TELEGRAM_WEBHOOK_PORT"] = ""
+            os.environ["TELEGRAM_WEBHOOK_URL"] = ""
+            os.environ["TELEGRAM_API_ROOT"] = "https://api.telegram.org"
+            
+            # Start the bot
+            TelegramYTDLBot.run_bot()
+            debug_write("Bot run_bot method completed")
+        except Exception as e:
+            debug_write(f"ERROR: Exception in run_bot: {e}")
+            import traceback
+            debug_write(f"Traceback: {traceback.format_exc()}")
     else:
         logger.info("Bot flag file not found, not starting bot")
+        debug_write("Bot flag file not found, not starting bot")

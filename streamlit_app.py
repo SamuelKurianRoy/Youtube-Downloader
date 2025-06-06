@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime
 import toml
 import threading
+import re
 
 # Import the debug module
 try:
@@ -102,36 +103,83 @@ def is_bot_running_in_cloud():
 def start_bot_in_cloud():
     """Start the bot in Streamlit Cloud using flag file"""
     try:
+        debug_write("Attempting to start bot in Streamlit Cloud")
+        
+        # Fix environment variables first
+        fix_environment_variables()
+        
         # Create the flag file
         with open(flag_file_path, 'w') as f:
             f.write(str(datetime.now()))
+        debug_write(f"Flag file created at {flag_file_path}")
+        
+        # Verify the flag file was created
+        if not flag_file_path.exists():
+            debug_write("ERROR: Flag file was not created successfully")
+            st.error("Failed to create bot flag file. Check file permissions.")
+            return False
             
+        debug_write(f"Flag file exists: {flag_file_path.exists()}")
+        
         # Log the attempt
         with open(bot_log_path, 'a') as f:
             f.write(f"{datetime.now()} - INFO - Attempting to start bot via Streamlit Cloud\n")
+        debug_write("Wrote to bot log about start attempt")
+        
+        # Try to run the bot directly first
+        success = run_bot_directly()
+        if success:
+            debug_write("Bot started directly")
+            return True
             
+        # If direct method fails, try subprocess method
+        debug_write("Direct method failed, trying subprocess method")
+        
         # In Streamlit Cloud, we need to actually start the process
         # We'll use a thread to avoid blocking the Streamlit app
         def run_bot():
             try:
+                debug_write("Starting bot process in thread")
                 with open(bot_log_path, 'a') as f:
                     f.write(f"{datetime.now()} - INFO - Starting bot process in thread\n")
                     
-                # Run the bot script
-                os.system(f"python {bot_script_path}")
+                # Run the bot script with subprocess
+                debug_write(f"Running: {sys.executable} {bot_script_path}")
+                
+                # Use subprocess.Popen for better control
+                process = subprocess.Popen(
+                    [sys.executable, str(bot_script_path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=os.environ.copy()  # Pass current environment
+                )
+                
+                # Log the process output
+                for line in process.stdout:
+                    debug_write(f"BOT OUTPUT: {line.strip()}")
+                
+                # Wait for process to complete
+                return_code = process.wait()
+                debug_write(f"Bot process exited with code: {return_code}")
                 
             except Exception as e:
+                error_msg = f"Failed to run bot: {e}"
+                debug_write(f"ERROR: {error_msg}")
                 with open(bot_log_path, 'a') as f:
-                    f.write(f"{datetime.now()} - ERROR - Failed to run bot: {e}\n")
+                    f.write(f"{datetime.now()} - ERROR - {error_msg}\n")
         
         # Start the bot in a thread
         bot_thread = threading.Thread(target=run_bot)
         bot_thread.daemon = True  # Allow the thread to be terminated when the app stops
         bot_thread.start()
+        debug_write("Bot thread started")
         
         return True
     except Exception as e:
-        st.error(f"Failed to start bot: {e}")
+        error_msg = f"Failed to start bot: {e}"
+        debug_write(f"ERROR: {error_msg}")
+        st.error(error_msg)
         return False
 
 def stop_bot_in_cloud():
@@ -316,18 +364,180 @@ def check_yt_dlp_version():
 # Function to check if bot token is configured
 def is_bot_configured():
     """Check if the bot token is configured in secrets or environment variables"""
+    debug_write("Checking if bot is configured")
+    
     # Check environment variables first
-    if os.environ.get("TELEGRAM_BOT_TOKEN"):
+    env_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if env_token:
+        debug_write("Bot token found in environment variables")
         return True
         
-    # Then check Streamlit secrets - correct way to access secrets
+    # Try to read from secrets file directly
     try:
-        if "TELEGRAM_BOT_TOKEN" in st.secrets:
-            return True
-    except:
-        pass
+        secrets_path = Path.cwd() / ".streamlit" / "secrets.toml"
+        debug_write(f"Looking for secrets file at: {secrets_path}")
         
+        if secrets_path.exists():
+            debug_write(f"Found secrets file at {secrets_path}")
+            try:
+                import toml
+                secrets_content = toml.load(str(secrets_path))
+                debug_write(f"Loaded secrets file, keys: {list(secrets_content.keys())}")
+                
+                if "TELEGRAM_BOT_TOKEN" in secrets_content:
+                    debug_write("Bot token found in secrets file")
+                    # Copy to environment variables
+                    os.environ["TELEGRAM_BOT_TOKEN"] = secrets_content["TELEGRAM_BOT_TOKEN"]
+                    return True
+            except Exception as e:
+                debug_write(f"Error parsing secrets file: {e}")
+    except Exception as e:
+        debug_write(f"Error reading secrets file directly: {e}")
+    
+    # Then check Streamlit secrets as a fallback
+    try:
+        if hasattr(st, 'secrets'):
+            debug_write(f"Checking Streamlit secrets, keys: {list(st.secrets.keys())}")
+            if "TELEGRAM_BOT_TOKEN" in st.secrets:
+                debug_write("Bot token found in Streamlit secrets")
+                # Copy to environment variables for child processes
+                os.environ["TELEGRAM_BOT_TOKEN"] = st.secrets["TELEGRAM_BOT_TOKEN"]
+                return True
+    except Exception as e:
+        debug_write(f"Error checking Streamlit secrets: {e}")
+    
+    debug_write("Bot token not found in any location")
     return False
+
+# Add a function to check bot token
+def check_bot_token():
+    """Check if the bot token is valid and accessible"""
+    try:
+        # Check environment variables first
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        
+        # Then check Streamlit secrets
+        if token is None:
+            try:
+                token = st.secrets["TELEGRAM_BOT_TOKEN"]
+            except:
+                pass
+        
+        if token:
+            masked_token = f"{token[:5]}...{token[-5:] if len(token) > 10 else ''}"
+            debug_write(f"Bot token found: {masked_token}")
+            
+            # Set the token in environment variables for child processes
+            os.environ["TELEGRAM_BOT_TOKEN"] = token
+            debug_write("Bot token set in environment variables")
+            
+            return True
+        else:
+            debug_write("ERROR: No bot token found")
+            return False
+    except Exception as e:
+        debug_write(f"ERROR checking bot token: {e}")
+        return False
+
+# Define a direct bot runner that doesn't rely on subprocess
+def run_bot_directly():
+    """Run the bot directly in the same process"""
+    try:
+        debug_write("Running bot directly in the same process")
+        
+        # Fix environment variables first
+        fix_environment_variables()
+        
+        # Import the bot module
+        from bot import TelegramYTDLBot
+        
+        # Create and run the bot
+        debug_write("Creating bot instance")
+        bot = TelegramYTDLBot()
+        
+        # Run the bot in a separate thread
+        def bot_thread_func():
+            try:
+                debug_write("Starting bot in thread")
+                import asyncio
+                asyncio.run(bot.start())
+            except Exception as e:
+                debug_write(f"ERROR: Bot thread failed: {e}")
+                import traceback
+                debug_write(f"Traceback: {traceback.format_exc()}")
+        
+        # Start the bot in a thread
+        bot_thread = threading.Thread(target=bot_thread_func)
+        bot_thread.daemon = True
+        bot_thread.start()
+        debug_write("Bot thread started")
+        
+        return True
+    except Exception as e:
+        debug_write(f"ERROR: Failed to run bot directly: {e}")
+        import traceback
+        debug_write(f"Traceback: {traceback.format_exc()}")
+        return False
+
+# Add a function to create the flag file
+def create_flag_file():
+    """Create the bot running flag file"""
+    try:
+        debug_write(f"Creating flag file at {flag_file_path}")
+        
+        # Ensure the directory exists
+        flag_file_path.parent.mkdir(exist_ok=True)
+        
+        # Create the flag file
+        with open(flag_file_path, 'w') as f:
+            f.write(str(datetime.now()))
+            
+        debug_write(f"Flag file created successfully: {flag_file_path.exists()}")
+        return True
+    except Exception as e:
+        debug_write(f"Error creating flag file: {e}")
+        return False
+
+# Add a function to check if the flag file exists
+def check_flag_file():
+    """Check if the flag file exists and create it if needed"""
+    if flag_file_path.exists():
+        debug_write(f"Flag file already exists at {flag_file_path}")
+        return True
+    else:
+        debug_write(f"Flag file does not exist at {flag_file_path}")
+        return create_flag_file()
+
+# Add this function to check and fix environment variables
+def fix_environment_variables():
+    """Check and fix environment variables that might be causing issues"""
+    debug_write("Checking environment variables for issues")
+    
+    # Check if TELEGRAM_WEBHOOK_PORT contains the bot token (common mistake)
+    webhook_port = os.environ.get("TELEGRAM_WEBHOOK_PORT", "")
+    if webhook_port and not webhook_port.isdigit() and len(webhook_port) > 20:
+        debug_write(f"Found invalid TELEGRAM_WEBHOOK_PORT: {webhook_port[:5]}...")
+        # This looks like a token, not a port
+        debug_write("Clearing invalid TELEGRAM_WEBHOOK_PORT")
+        os.environ["TELEGRAM_WEBHOOK_PORT"] = ""
+        
+    # Check if TELEGRAM_API_ROOT is valid
+    api_root = os.environ.get("TELEGRAM_API_ROOT", "")
+    if api_root and not api_root.startswith(("http://", "https://")):
+        debug_write(f"Found invalid TELEGRAM_API_ROOT: {api_root}")
+        # Set to default
+        debug_write("Setting TELEGRAM_API_ROOT to default")
+        os.environ["TELEGRAM_API_ROOT"] = "https://api.telegram.org"
+    
+    # Check if TELEGRAM_WEBHOOK_URL is valid
+    webhook_url = os.environ.get("TELEGRAM_WEBHOOK_URL", "")
+    if webhook_url and not webhook_url.startswith(("http://", "https://")):
+        debug_write(f"Found invalid TELEGRAM_WEBHOOK_URL: {webhook_url}")
+        # Clear it
+        debug_write("Clearing invalid TELEGRAM_WEBHOOK_URL")
+        os.environ["TELEGRAM_WEBHOOK_URL"] = ""
+    
+    debug_write("Environment variables checked and fixed")
 
 # Initialize session state
 if 'bot_running' not in st.session_state:
@@ -378,23 +588,83 @@ with st.sidebar:
             st.code(example_secrets, language="toml")
             
             st.write("Or configure these settings in Streamlit Cloud's secrets management.")
+        
+        # Separate expander for bot creation instructions
+        with st.expander("How to Create a Telegram Bot"):
+            st.write("""
+            ### Creating a Telegram Bot
+            
+            1. Open Telegram and search for the "BotFather" (@BotFather)
+            2. Start a chat with BotFather and send the command `/newbot`
+            3. Follow the instructions to create your bot:
+               - Provide a name for your bot
+               - Provide a username for your bot (must end with 'bot')
+            4. BotFather will give you a token that looks like `123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ`
+            5. Copy this token and use it as your `TELEGRAM_BOT_TOKEN`
+            
+            ### Setting Up Streamlit Cloud Secrets
+            
+            1. Go to your Streamlit Cloud dashboard
+            2. Select your app
+            3. Click on "Settings" in the app menu
+            4. Scroll down to "Secrets"
+            5. Add your bot token in the following format:
+            
+            ```toml
+            TELEGRAM_BOT_TOKEN = "your_bot_token_here"
+            ```
+            
+            6. Click "Save"
+            7. Restart your app
+            """)
+            
+        # Add a form to set the bot token temporarily
+        st.write("### Temporary Bot Token Configuration")
+        st.write("You can set the bot token temporarily for this session:")
+        
+        with st.form("bot_token_form"):
+            temp_token = st.text_input("Enter your Telegram Bot Token", type="password")
+            submit_button = st.form_submit_button("Set Token")
+            
+            if submit_button and temp_token:
+                os.environ["TELEGRAM_BOT_TOKEN"] = temp_token
+                st.success("Bot token set for this session!")
+                st.info("Note: This setting will be lost when the app restarts. For permanent configuration, use Streamlit secrets.")
+                time.sleep(2)
+                st.rerun()
     
     status = "🟢 RUNNING" if st.session_state.bot_running else "🔴 STOPPED"
     status_class = "status-running" if st.session_state.bot_running else "status-stopped"
     st.markdown(f"<h3 style='text-align: center;' class='{status_class}'>{status}</h3>", unsafe_allow_html=True)
     
     if st.session_state.bot_running:
-        if st.button("⏹️ STOP BOT", type="primary", use_container_width=True):
-            if stop_bot():
-                st.success("Bot stopped successfully!")
-                time.sleep(1)
-                st.rerun()
+        if st.button("Stop Bot"):
+            if is_streamlit_cloud:
+                if stop_bot_in_cloud():
+                    st.success("Bot stopping... Flag file removed.")
+                    st.session_state.bot_running = False
+                    time.sleep(1)
+                    st.rerun()
+            else:
+                if stop_bot():
+                    st.success("Bot stopped.")
+                    st.session_state.bot_running = False
+                    time.sleep(1)
+                    st.rerun()
     else:
-        if st.button("▶️ START BOT", type="primary", use_container_width=True):
-            if start_bot():
-                st.success("Bot started successfully!")
-                time.sleep(1)
-                st.rerun()
+        if st.button("Start Bot"):
+            if is_streamlit_cloud:
+                if start_bot_in_cloud():
+                    st.success("Bot starting... Flag file created.")
+                    st.session_state.bot_running = True
+                    time.sleep(1)
+                    st.rerun()
+            else:
+                if start_bot():
+                    st.success("Bot started.")
+                    st.session_state.bot_running = True
+                    time.sleep(1)
+                    st.rerun()
     
     st.divider()
     
@@ -606,6 +876,36 @@ with st.expander("Debug Information"):
     st.write(f"Current Working Directory: `{os.getcwd()}`")
     st.write(f"Logs Directory: `{logs_dir}`")
     
+    # Check for secrets file
+    secrets_path = Path.cwd() / ".streamlit" / "secrets.toml"
+    st.write(f"Secrets File Path: `{secrets_path}`")
+    st.write(f"Secrets File Exists: `{secrets_path.exists()}`")
+    
+    # Try to read secrets file content
+    if secrets_path.exists():
+        try:
+            with open(secrets_path, 'r') as f:
+                secrets_content = f.read()
+            st.write("### Secrets File Content (masked)")
+            # Mask any tokens in the file
+            masked_content = re.sub(r'(["\']\w{5,})[^"\']*(["\'])', r'\1...\2', secrets_content)
+            st.code(masked_content, language="toml")
+        except Exception as e:
+            st.error(f"Error reading secrets file: {e}")
+    
+    # Check if we can access secrets through Streamlit
+    st.write("### Streamlit Secrets Access")
+    try:
+        # List available secret keys (without showing values)
+        secret_keys = list(st.secrets.keys()) if hasattr(st, 'secrets') else []
+        st.write(f"Available secret keys: {secret_keys}")
+        
+        # Check specifically for TELEGRAM_BOT_TOKEN
+        has_token = "TELEGRAM_BOT_TOKEN" in st.secrets if hasattr(st, 'secrets') else False
+        st.write(f"Has TELEGRAM_BOT_TOKEN in secrets: {has_token}")
+    except Exception as e:
+        st.error(f"Error accessing Streamlit secrets: {e}")
+    
     st.write("### File Existence")
     st.write(f"Logs Directory Exists: `{logs_dir.exists()}`")
     st.write(f"Bot Log Exists: `{Path(bot_log_path).exists()}`")
@@ -655,7 +955,174 @@ with st.expander("Debug Information"):
             st.error(error_message)
             debug_write(f"ERROR: {error_message}")
 
+# Add this to the sidebar when bot is not configured
+if not is_bot_configured():
+    if st.button("Check Bot Token Again"):
+        if is_bot_configured():
+            st.success("Bot token found!")
+            time.sleep(1)
+            st.rerun()
+        else:
+            st.error("Still no bot token found. Please check the debug information.")
 
+# Add this to the main UI section
+with st.expander("Bot Flag File Status"):
+    st.write(f"Flag file path: `{flag_file_path}`")
+    flag_exists = flag_file_path.exists()
+    st.write(f"Flag file exists: `{flag_exists}`")
+    
+    if flag_exists:
+        try:
+            with open(flag_file_path, 'r') as f:
+                flag_content = f.read()
+            st.write(f"Flag file content: `{flag_content}`")
+        except Exception as e:
+            st.error(f"Error reading flag file: {e}")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Create Flag File"):
+            if create_flag_file():
+                st.success("Flag file created successfully!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Failed to create flag file. Check permissions.")
+    
+    with col2:
+        if st.button("Delete Flag File"):
+            try:
+                if flag_file_path.exists():
+                    flag_file_path.unlink()
+                    st.success("Flag file deleted successfully!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.info("Flag file doesn't exist.")
+            except Exception as e:
+                st.error(f"Error deleting flag file: {e}")
+    
+    # Add a button to check if the bot can read the flag file
+    if st.button("Test Bot Flag File"):
+        from bot import should_start_bot
+        if should_start_bot():
+            st.success("Bot can detect the flag file!")
+        else:
+            st.error("Bot cannot detect the flag file.")
 
+# Add this to the debug section
+def test_secrets_access():
+    """Test if the bot can access the secrets file"""
+    try:
+        # Try to read the secrets file directly
+        secrets_path = Path.cwd() / ".streamlit" / "secrets.toml"
+        if not secrets_path.exists():
+            return False, f"Secrets file not found at {secrets_path}"
+        
+        # Try to parse the secrets file
+        import toml
+        secrets_content = toml.load(str(secrets_path))
+        
+        # Check if the token is in the secrets file
+        if "TELEGRAM_BOT_TOKEN" not in secrets_content:
+            return False, "TELEGRAM_BOT_TOKEN not found in secrets file"
+        
+        # Check if the token is valid (not empty)
+        token = secrets_content["TELEGRAM_BOT_TOKEN"]
+        if not token or len(token) < 10:
+            return False, "TELEGRAM_BOT_TOKEN is empty or too short"
+        
+        # Set the token in environment variables
+        os.environ["TELEGRAM_BOT_TOKEN"] = token
+        
+        return True, f"Successfully read token from secrets file: {token[:5]}...{token[-5:] if len(token) > 10 else ''}"
+    except Exception as e:
+        return False, f"Error reading secrets file: {e}"
+
+# Add a button to test secrets access
+with st.expander("Test Secrets Access"):
+    if st.button("Test Secrets File Access"):
+        success, message = test_secrets_access()
+        if success:
+            st.success(message)
+        else:
+            st.error(message)
+
+# Add this to the main UI section
+with st.expander("Environment Variables"):
+    st.write("### Current Environment Variables")
+    
+    # Display current environment variables
+    env_vars = {
+        "TELEGRAM_BOT_TOKEN": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        "TELEGRAM_WEBHOOK_URL": os.environ.get("TELEGRAM_WEBHOOK_URL", ""),
+        "TELEGRAM_WEBHOOK_PORT": os.environ.get("TELEGRAM_WEBHOOK_PORT", ""),
+        "TELEGRAM_API_ROOT": os.environ.get("TELEGRAM_API_ROOT", ""),
+        "ADMIN_ID": os.environ.get("ADMIN_ID", ""),
+        "WHITELISTED_IDS": os.environ.get("WHITELISTED_IDS", ""),
+        "ALLOW_GROUPS": os.environ.get("ALLOW_GROUPS", ""),
+        "YTDL_AUTOUPDATE": os.environ.get("YTDL_AUTOUPDATE", ""),
+        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
+        "COBALT_INSTANCE_URL": os.environ.get("COBALT_INSTANCE_URL", "")
+    }
+    
+    # Display masked values
+    for key, value in env_vars.items():
+        if key == "TELEGRAM_BOT_TOKEN" or key == "OPENAI_API_KEY":
+            # Mask sensitive values
+            masked_value = f"{value[:5]}...{value[-5:] if len(value) > 10 else ''}" if value else ""
+            st.text_input(key, value=masked_value, disabled=True)
+        else:
+            st.text_input(key, value=value, disabled=True)
+    
+    # Add a button to fix environment variables
+    if st.button("Fix Environment Variables"):
+        fix_environment_variables()
+        st.success("Environment variables checked and fixed!")
+        time.sleep(1)
+        st.rerun()
+
+# Add this to the main UI section
+with st.expander("Fix Bot Issues"):
+    st.write("### Fix Common Bot Issues")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("Check Bot Token"):
+            if check_bot_token():
+                st.success("Bot token is valid and accessible!")
+            else:
+                st.error("Bot token is not valid or not accessible.")
+    
+    with col2:
+        if st.button("Fix All Environment Variables"):
+            # Fix environment variables
+            fix_environment_variables()
+            
+            # Check if TELEGRAM_WEBHOOK_PORT is a valid port number
+            webhook_port = os.environ.get("TELEGRAM_WEBHOOK_PORT", "")
+            if webhook_port and not webhook_port.isdigit():
+                st.warning(f"Invalid TELEGRAM_WEBHOOK_PORT: {webhook_port[:5]}...")
+                os.environ["TELEGRAM_WEBHOOK_PORT"] = ""
+                st.info("TELEGRAM_WEBHOOK_PORT has been cleared.")
+            
+            # Check if TELEGRAM_API_ROOT is valid
+            api_root = os.environ.get("TELEGRAM_API_ROOT", "")
+            if api_root and not api_root.startswith(("http://", "https://")):
+                st.warning(f"Invalid TELEGRAM_API_ROOT: {api_root}")
+                os.environ["TELEGRAM_API_ROOT"] = "https://api.telegram.org"
+                st.info("TELEGRAM_API_ROOT has been set to default.")
+            
+            # Check if TELEGRAM_WEBHOOK_URL is valid
+            webhook_url = os.environ.get("TELEGRAM_WEBHOOK_URL", "")
+            if webhook_url and not webhook_url.startswith(("http://", "https://")):
+                st.warning(f"Invalid TELEGRAM_WEBHOOK_URL: {webhook_url}")
+                os.environ["TELEGRAM_WEBHOOK_URL"] = ""
+                st.info("TELEGRAM_WEBHOOK_URL has been cleared.")
+            
+            st.success("Environment variables have been fixed!")
+            time.sleep(1)
+            st.rerun()
 
 
