@@ -859,7 +859,11 @@ class TelegramYTDLBot:
             
             # Setup FFmpeg
             await self.setup_ffmpeg()
-            
+
+            # Verify spotdl configuration if FFmpeg is available
+            if self.ffmpeg_path:
+                await self.verify_spotdl_setup()
+
             debug_write("Bot initialized successfully")
             return True
             
@@ -900,6 +904,10 @@ class TelegramYTDLBot:
                 # System FFmpeg is available
                 self.ffmpeg_path = "system"
                 logger.info("Using system FFmpeg installation")
+
+                # Configure spotdl to use system FFmpeg
+                await self.configure_spotdl_ffmpeg()
+
             elif ffmpeg_result:
                 # Local FFmpeg directory
                 self.ffmpeg_path = ffmpeg_result
@@ -908,6 +916,10 @@ class TelegramYTDLBot:
                 if self.ffmpeg_path not in current_path:
                     os.environ["PATH"] = self.ffmpeg_path + os.pathsep + current_path
                 logger.info(f"FFmpeg set up at: {self.ffmpeg_path}")
+
+                # Configure spotdl to use local FFmpeg
+                await self.configure_spotdl_ffmpeg()
+
             else:
                 # No FFmpeg available
                 self.ffmpeg_path = None
@@ -920,6 +932,129 @@ class TelegramYTDLBot:
             logger.info("Continuing without FFmpeg - some features may be limited")
             self.ffmpeg_path = None
             return None
+
+    async def configure_spotdl_ffmpeg(self):
+        """Configure spotdl to use the available FFmpeg installation."""
+        try:
+            if self.ffmpeg_path == "system":
+                # For system FFmpeg, set the FFMPEG_BINARY environment variable
+                # This tells spotdl where to find FFmpeg
+                os.environ["FFMPEG_BINARY"] = "ffmpeg"
+                logger.info("Configured spotdl to use system FFmpeg")
+
+                # Test if spotdl can find FFmpeg now
+                try:
+                    test_result = subprocess.run(
+                        ["spotdl", "--check-ffmpeg"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if test_result.returncode == 0:
+                        logger.info("spotdl successfully configured to use system FFmpeg")
+                    else:
+                        logger.warning(f"spotdl FFmpeg check failed: {test_result.stderr}")
+                except Exception as e:
+                    logger.warning(f"Could not test spotdl FFmpeg configuration: {e}")
+
+            elif self.ffmpeg_path:
+                # For local FFmpeg, set the full path
+                import platform
+                system = platform.system().lower()
+                if system == "windows":
+                    ffmpeg_exe = Path(self.ffmpeg_path) / "ffmpeg.exe"
+                else:
+                    ffmpeg_exe = Path(self.ffmpeg_path) / "ffmpeg"
+
+                if ffmpeg_exe.exists():
+                    os.environ["FFMPEG_BINARY"] = str(ffmpeg_exe)
+                    logger.info(f"Configured spotdl to use local FFmpeg: {ffmpeg_exe}")
+
+                    # Test if spotdl can find FFmpeg now
+                    try:
+                        test_result = subprocess.run(
+                            ["spotdl", "--check-ffmpeg"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+                        if test_result.returncode == 0:
+                            logger.info("spotdl successfully configured to use local FFmpeg")
+                        else:
+                            logger.warning(f"spotdl FFmpeg check failed: {test_result.stderr}")
+                    except Exception as e:
+                        logger.warning(f"Could not test spotdl FFmpeg configuration: {e}")
+                else:
+                    logger.warning(f"FFmpeg executable not found at: {ffmpeg_exe}")
+
+        except Exception as e:
+            logger.error(f"Error configuring spotdl FFmpeg: {e}")
+
+    async def verify_spotdl_setup(self):
+        """Verify that spotdl is properly configured and can find FFmpeg."""
+        try:
+            logger.info("Verifying spotdl setup...")
+
+            # Check if spotdl is installed
+            try:
+                version_result = subprocess.run(
+                    ["spotdl", "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if version_result.returncode == 0:
+                    version_info = version_result.stdout.strip()
+                    logger.info(f"Using spotdl version: {version_info}")
+                else:
+                    logger.error("spotdl is not properly installed")
+                    return False
+            except Exception as e:
+                logger.error(f"spotdl is not available: {e}")
+                return False
+
+            # Check if spotdl can find FFmpeg
+            try:
+                ffmpeg_check = subprocess.run(
+                    ["spotdl", "--check-ffmpeg"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if ffmpeg_check.returncode == 0:
+                    logger.info("spotdl successfully found FFmpeg")
+                    return True
+                else:
+                    logger.warning(f"spotdl cannot find FFmpeg: {ffmpeg_check.stderr}")
+
+                    # If system FFmpeg is available but spotdl can't find it,
+                    # try to download FFmpeg specifically for spotdl as a one-time setup
+                    if self.ffmpeg_path == "system":
+                        logger.info("Attempting one-time FFmpeg setup for spotdl...")
+                        try:
+                            ffmpeg_download = subprocess.run(
+                                ["spotdl", "--download-ffmpeg"],
+                                capture_output=True,
+                                text=True,
+                                timeout=120
+                            )
+                            if ffmpeg_download.returncode == 0:
+                                logger.info("Successfully set up FFmpeg for spotdl")
+                                return True
+                            else:
+                                logger.warning(f"Could not set up FFmpeg for spotdl: {ffmpeg_download.stderr}")
+                        except Exception as setup_error:
+                            logger.warning(f"Could not set up FFmpeg for spotdl: {setup_error}")
+
+                    return False
+
+            except Exception as e:
+                logger.warning(f"Could not check spotdl FFmpeg configuration: {e}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error verifying spotdl setup: {e}")
+            return False
 
     async def start(self):
         """Start the bot with proper initialization."""
@@ -1610,26 +1745,14 @@ Just send me a link to get started! 🎧"""
                 "--output", str(output_dir)
             ]
 
-            # Add FFmpeg path if available
+            # FFmpeg should already be configured via environment variable
+            # No need to add --ffmpeg parameter as spotdl will use FFMPEG_BINARY env var
             if self.ffmpeg_path == "system":
-                # System FFmpeg is available, spotdl will find it automatically
-                logger.info("Using system FFmpeg for spotdl")
+                logger.info("Using system FFmpeg for spotdl (configured via environment)")
             elif self.ffmpeg_path:
-                # Find the actual FFmpeg executable in local directory
-                import platform
-                system = platform.system().lower()
-                if system == "windows":
-                    ffmpeg_exe = Path(self.ffmpeg_path) / "ffmpeg.exe"
-                else:
-                    ffmpeg_exe = Path(self.ffmpeg_path) / "ffmpeg"
-
-                if ffmpeg_exe.exists():
-                    spotdl_cmd.extend(["--ffmpeg", str(ffmpeg_exe)])
-                    logger.info(f"Using local FFmpeg for spotdl: {ffmpeg_exe}")
-                else:
-                    logger.warning(f"FFmpeg not found at expected path: {ffmpeg_exe}")
+                logger.info(f"Using local FFmpeg for spotdl (configured via environment): {self.ffmpeg_path}")
             else:
-                logger.warning("No FFmpeg path available for spotdl")
+                logger.warning("No FFmpeg configured - spotdl may fail")
 
             # Check if spotdl is available
             try:
@@ -1640,20 +1763,11 @@ Just send me a link to get started! 🎧"""
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 raise Exception("spotdl is not installed. Please install it with: pip install spotdl")
 
-            # Pre-emptively try to ensure FFmpeg is available for spotdl
-            try:
-                # Check if spotdl can find FFmpeg
-                ffmpeg_check = subprocess.run(["spotdl", "--check-ffmpeg"], capture_output=True, text=True, timeout=10)
-                if ffmpeg_check.returncode != 0:
-                    logger.warning("spotdl cannot find FFmpeg, attempting to download it")
-                    # Try to download FFmpeg for spotdl
-                    ffmpeg_download = subprocess.run(["spotdl", "--download-ffmpeg"], capture_output=True, text=True, timeout=120)
-                    if ffmpeg_download.returncode == 0:
-                        logger.info("Successfully downloaded FFmpeg for spotdl")
-                    else:
-                        logger.warning(f"Failed to download FFmpeg for spotdl: {ffmpeg_download.stderr}")
-            except Exception as ffmpeg_setup_error:
-                logger.warning(f"Could not pre-setup FFmpeg for spotdl: {ffmpeg_setup_error}")
+            # FFmpeg should already be configured during bot initialization
+            # Log the current FFmpeg configuration for debugging
+            logger.info(f"Using FFmpeg configuration: {self.ffmpeg_path}")
+            if "FFMPEG_BINARY" in os.environ:
+                logger.info(f"FFMPEG_BINARY environment variable: {os.environ['FFMPEG_BINARY']}")
 
             await query.edit_message_text("🎵 Downloading with spotdl...")
 
@@ -1682,68 +1796,26 @@ Just send me a link to get started! 🎧"""
 
             if result.returncode != 0:
                 error_output = result.stderr or result.stdout
+                logger.warning(f"spotdl failed with error: {error_output}")
 
                 # Check if the error is related to FFmpeg
                 if "FFmpegError" in error_output or "FFmpeg is not installed" in error_output:
-                    logger.warning("spotdl FFmpeg error detected, trying to fix...")
+                    logger.error("spotdl FFmpeg error detected. FFmpeg should have been configured during bot startup.")
+                    logger.error("This indicates a configuration issue with the FFmpeg setup.")
 
-                    # Try to download FFmpeg specifically for spotdl
-                    try:
-                        await query.edit_message_text("🔧 Setting up FFmpeg for Spotify downloads...")
-
-                        # Run spotdl --download-ffmpeg
-                        ffmpeg_install_result = await asyncio.get_event_loop().run_in_executor(
-                            None,
-                            lambda: sp.run(
-                                ["spotdl", "--download-ffmpeg"],
-                                capture_output=True,
-                                text=True,
-                                timeout=120  # 2 minute timeout for FFmpeg download
-                            )
-                        )
-
-                        if ffmpeg_install_result.returncode == 0:
-                            logger.info("FFmpeg installed successfully for spotdl")
-                            await query.edit_message_text("🎵 Retrying Spotify download...")
-
-                            # Retry the original command without --ffmpeg flag
-                            retry_cmd = [
-                                "spotdl",
-                                "download",  # Required operation for spotdl 4.x
-                                url,  # URL comes after operation
-                                "--bitrate", f"{bitrate}k",
-                                "--format", "mp3",
-                                "--output", str(output_dir)
-                            ]
-
-                            retry_result = await asyncio.get_event_loop().run_in_executor(
-                                None,
-                                lambda: sp.run(
-                                    retry_cmd,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=300,
-                                    cwd=str(output_dir)
-                                )
-                            )
-
-                            if retry_result.returncode == 0:
-                                result = retry_result  # Use the successful retry result
-                            else:
-                                raise Exception(f"spotdl retry failed: {retry_result.stderr or retry_result.stdout}")
-                        else:
-                            raise Exception(f"Failed to install FFmpeg for spotdl: {ffmpeg_install_result.stderr}")
-
-                    except Exception as ffmpeg_fix_error:
-                        logger.error(f"Could not fix FFmpeg for spotdl: {ffmpeg_fix_error}")
-                        # Try fallback to yt-dlp with YouTube search
-                        logger.info("Attempting fallback to YouTube search for Spotify track")
-                        return await self.download_spotify_fallback(query, url, quality, username, user_id)
+                    # Provide more specific error message
+                    await query.edit_message_text(
+                        "❌ Spotify download failed due to FFmpeg configuration issue.\n\n"
+                        "💡 The bot administrator needs to check the FFmpeg installation.\n"
+                        "🔄 Trying alternative download method..."
+                    )
                 else:
-                    # For other errors, try the fallback method
-                    logger.warning(f"spotdl failed with error: {error_output}")
-                    logger.info("Attempting fallback to YouTube search for Spotify track")
-                    return await self.download_spotify_fallback(query, url, quality, username, user_id)
+                    # For other errors, show the error and try fallback
+                    await query.edit_message_text(f"❌ Spotify download failed: {error_output[:200]}...\n\n🔄 Trying alternative method...")
+
+                # Try fallback to yt-dlp with YouTube search for any error
+                logger.info("Attempting fallback to YouTube search for Spotify track")
+                return await self.download_spotify_fallback(query, url, quality, username, user_id)
 
             # Find the downloaded file
             downloaded_files = list(output_dir.glob("*.mp3"))
